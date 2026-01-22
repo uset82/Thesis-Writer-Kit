@@ -1,0 +1,61 @@
+# Thesis Configuration
+
+thesis:
+  # Basic Info
+  title: "Governing AI and Sustainability at Equinor: Balancing Efficiency, Ethics, and the Twin Transition"
+  research_question: "How should Equinor govern its AI deployment to balance operational efficiency with ethical workforce transition and genuine sustainability commitments?"
+  
+  # Academic Settings
+  level: master  # Options: bachelor, master, phd
+  word_limit: 4000
+  citation_style: apa7  # Options: apa7, mla9, chicago, harvard
+  
+  # Section Structure
+  sections:
+    - name: introduction
+      target_words: 600
+      status: not_started
+      
+    - name: theoretical_framework
+      target_words: 600
+      status: not_started
+      
+    - name: case_study
+      target_words: 800
+      status: not_started
+      
+    - name: ethical_analysis
+      target_words: 1000
+      status: not_started
+      
+    - name: recommendations
+      target_words: 800
+      status: not_started
+      
+    - name: conclusion
+      target_words: 400
+      status: not_started
+
+  # Output Settings
+  output:
+    format: pdf  # Options: pdf, docx, latex, md
+    template: academic
+    include_toc: true
+    include_bibliography: true
+
+# Research Settings
+research:
+  databases:
+    - openAlex
+    - crossref
+    - semanticScholar
+    - arXiv
+  date_filter: "2019-2025"
+  prefer_peer_reviewed: true
+
+# Quality Settings
+quality:
+  ai_detection_threshold: low  # Options: low, medium, high
+  min_citations_per_section: 3
+  require_doi_verification: true
+  humanize_on_draft: true
