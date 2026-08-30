@@ -14,21 +14,46 @@
 
 ---
 
-## Quick Start
+## ⚡ Lazy 1-Click Setup (Any AI IDE)
 
-```bash
-# Navigate to the engine
-cd .agent/opendraft/engine
+### Option A: Just drop this repository into your favorite AI IDE 🤖
+*(Antigravity, Cursor, Codex, Claude Code, Windsurf, OpenClaw)*
 
-# Install dependencies
-pip install -r requirements.txt
+1. Clone or open this repository in your IDE:
+   ```bash
+   git clone https://github.com/uset82/Thesis-Writer-Kit.git
+   ```
+2. Simply tell your AI in the chat:
+   > *"Set up Thesis-Writer-Kit and help me research, draft, and de-AI my thesis on [Your Topic]."*
 
-# Setup API key (first time only)
-python -m opendraft.cli setup
+Your IDE's agent will automatically detect the `.agent/` specialist agents, skills, and rules, install all dependencies, and begin researching over 200M+ papers!
 
-# Generate a draft
-python -m opendraft.cli "Your research topic" --level master --lang en
+---
+
+### Option B: 1-Click Automated Terminal Script 🚀
+
+**Windows (PowerShell):**
+```powershell
+.\setup.ps1
 ```
+
+**macOS / Linux (Bash):**
+```bash
+chmod +x setup.sh && ./setup.sh
+```
+
+---
+
+## 🚀 Quick Action Table
+
+| Goal | Command / Action | What it does |
+|---|---|---|
+| 🔍 **Literature Search** | `python -m opendraft.cli "Topic" --expose` | Searches 200M+ papers and builds outline with citations |
+| ✍️ **Draft Chapter** | `python -m opendraft.cli "Topic" --level master` | Generates full chapter draft with APA 7 verified citations |
+| 🛡️ **Audit AI Signals (0–100)** | `python -m opendraft.cli audit --text "..."` | Deterministic 0–100 score & exact line-by-line pattern flags |
+| 🎭 **Humanize & Match Voice** | `python -m opendraft.cli humanize --text "..." --sample sample.txt` | De-AIs prose using 69 empirical rules and matches your rhythm |
+| 📄 **Export to LibreOffice / Word** | `python -m opendraft.cli export --text draft.md --format odt` | Converts to styled `.odt`, `.docx`, or `.pdf` with LaTeX Math |
+| 🌐 **Interactive Web Interface** | `cd tools/yourwrite; npm start` | Launches web UI on `http://localhost:3000` |
 
 ---
 
