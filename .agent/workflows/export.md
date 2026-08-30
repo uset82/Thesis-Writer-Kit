@@ -8,8 +8,9 @@
 
 ```
 /export
-/export --format pdf
+/export --format odt
 /export --format docx --template academic
+/export --format pdf
 /export --format latex --bibliography
 ```
 
@@ -19,11 +20,12 @@
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--format` | Output format (pdf, docx, latex, md) | pdf |
-| `--template` | Template to use | academic |
-| `--bibliography` | Include reference list | true |
-| `--toc` | Include table of contents | true |
-| `--output FILE` | Output filename | thesis_[date] |
+| `--format` | Output format (`odt`, `docx`, `pdf`, `latex`, `html`, `md`) | `odt` |
+| `--template` | Template to use (`academic`, `formal`, `minimal`, `draft`) | `academic` |
+| `--bibliography` | Include formatted reference list | `true` |
+| `--toc` | Include table of contents | `true` |
+| `--math` | Preserve LaTeX math as LibreOffice Math objects | `true` |
+| `--output FILE` | Output destination filename | `thesis_[date]` |
 
 ---
 

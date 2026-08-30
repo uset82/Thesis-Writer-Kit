@@ -1,0 +1,244 @@
+import json
+import socket
+from unittest.mock import patch, MagicMock, mock_open
+import ssl
+from plugin.framework.client.llm_client import LlmClient
+from plugin.framework.errors import format_error_message
+from plugin.framework.client.errors import (
+    is_audio_unsupported_error,
+    _format_http_error_response,
+)
+
+def test_is_audio_unsupported_error():
+    # Common messages indicating lack of audio support
+    assert is_audio_unsupported_error("unsupported content type for input audio") is True
+    # "unsupported modality" test based on function signature
+    assert is_audio_unsupported_error("unsupported modality") is True
+    assert is_audio_unsupported_error("audio not supported") is True
+    assert is_audio_unsupported_error("modality not supported") is True
+
+    # Specific API error bodies (passed via _format_http_error_response)
+    assert is_audio_unsupported_error("model cannot process audio") is True
+    assert is_audio_unsupported_error("No endpoints found that support input audio") is True
+
+    # Just a general error
+    assert is_audio_unsupported_error("Connection timed out") is False
+    assert is_audio_unsupported_error("HTTP Error 401") is False
+
+def test_format_error_message():
+    import urllib.error
+
+    # HTTP errors
+    err = urllib.error.HTTPError("url", 401, "Unauthorized", {}, None)
+    assert "Invalid API Key" in format_error_message(err)
+
+    err = urllib.error.HTTPError("url", 403, "Forbidden", {}, None)
+    assert "Forbidden" in format_error_message(err)
+
+    err = urllib.error.HTTPError("url", 429, "Too Many Requests", {}, None)
+    assert "429" in format_error_message(err)
+    assert "Rate limited" in format_error_message(err)
+
+    # Socket / Connection errors
+    err = urllib.error.URLError("Connection refused")
+    assert "Connection Refused" in format_error_message(err)
+
+    # Check timeout
+    err = socket.timeout("timed out")
+    assert "Timed Out" in format_error_message(err) or "timed out" in format_error_message(err).lower()
+
+@patch("plugin.framework.client.llm_client.sync_request")
+def test_transcribe_audio_uses_sync_request_fallback(mock_sync):
+    """
+    Test that transcribe_audio uses the multipart/form-data fallback via sync_request
+    when the model does not have native audio.
+    """
+    # Mock return value
+    mock_sync.return_value = {"text": "Hello world from STT"}
+
+    # Mock ctx
+    ctx = MagicMock()
+
+    # We must patch has_native_audio in the namespace where transcribe_audio calls it
+    # Looking at the code: from plugin.framework.config import has_native_audio
+    with patch("plugin.framework.client.model_fetcher.has_native_audio", return_value=False):
+        client = LlmClient({"endpoint": "http://test", "stt_model": "whisper-1"}, ctx)
+
+        # Call with a dummy path using mock_open
+        m = mock_open(read_data=b"dummy audio data")
+        with patch("builtins.open", m):
+            result = client.transcribe_audio("dummy.wav")
+
+        assert result == "Hello world from STT"
+        assert mock_sync.called
+        args, kwargs = mock_sync.call_args
+
+        # Assert url
+        assert args[0] == "http://test/v1/audio/transcriptions"
+
+        # Assert headers content type was set to multipart
+        headers = kwargs.get("headers", {})
+        content_type = headers.get("Content-Type", "")
+        assert "multipart/form-data" in content_type
+        assert kwargs.get("timeout") == 120
+
+        # Assert body format
+        boundary = content_type.split("boundary=")[1]
+        body = kwargs.get("data", b"")
+        assert boundary.encode("utf-8") in body
+        assert b'name="file"; filename="dummy.wav"' in body
+        assert b'name="model"' in body
+
+@patch("plugin.framework.client.llm_client.LlmClient.chat_completion_sync")
+def test_transcribe_audio_uses_native_audio(mock_sync_chat):
+    """
+    Test that transcribe_audio calls the native chat pipeline when the STT model
+    is recognized as supporting native audio.
+    """
+    mock_sync_chat.return_value = "Native multimodal transcript"
+    ctx = MagicMock()
+
+    with patch("plugin.framework.client.model_fetcher.has_native_audio", return_value=True):
+        client = LlmClient({"endpoint": "http://test", "stt_model": "gemini-flash"}, ctx)
+
+        m = mock_open(read_data=b"dummy audio data")
+        with patch("builtins.open", m):
+            result = client.transcribe_audio("dummy.wav")
+
+        assert result == "Native multimodal transcript"
+        assert mock_sync_chat.called
+
+@patch("plugin.framework.client.llm_client.sync_request")
+def test_transcribe_audio_openrouter_uses_json_body(mock_sync):
+    """OpenRouter /audio/transcriptions expects JSON with base64 input_audio, not multipart."""
+    mock_sync.return_value = {"text": "Hello from OpenRouter STT"}
+    ctx = MagicMock()
+
+    with patch("plugin.framework.client.model_fetcher.has_native_audio", return_value=False):
+        client = LlmClient(
+            {
+                "endpoint": "https://openrouter.ai/api",
+                "stt_model": "mistralai/voxtral-mini-transcribe",
+                "is_openrouter": True,
+                "api_key": "test-key",
+            },
+            ctx,
+        )
+
+        m = mock_open(read_data=b"dummy audio data")
+        with patch("builtins.open", m):
+            result = client.transcribe_audio("dummy.wav")
+
+        assert result == "Hello from OpenRouter STT"
+        assert mock_sync.called
+        args, kwargs = mock_sync.call_args
+        assert args[0] == "https://openrouter.ai/api/v1/audio/transcriptions"
+        headers = kwargs.get("headers", {})
+        assert headers.get("Content-Type") == "application/json"
+        body = json.loads(kwargs.get("data", b"").decode("utf-8"))
+        assert body["model"] == "mistralai/voxtral-mini-transcribe"
+        assert body["input_audio"]["format"] == "wav"
+        assert body["input_audio"]["data"]  # base64 payload present
+
+def test_llm_client_chat_with_tools_normalizes():
+    """
+    Test that request_with_tools normalizes standard chat completion responses.
+    """
+    ctx = MagicMock()
+    client = LlmClient({"endpoint": "http://test", "model": "test-model"}, ctx)
+
+    # Mock HTTP response
+    mock_response = MagicMock()
+    mock_response.status = 200
+    mock_response.read.return_value = json.dumps({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "Sure, calling tool.",
+                "tool_calls": [{"id": "1", "type": "function", "function": {"name": "hello"}}]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    }).encode("utf-8")
+
+    with patch.object(client._transport, "send", return_value=mock_response):
+        result = client.request_with_tools([{"role": "user", "content": "Hi"}])
+
+        assert result["role"] == "assistant"
+        assert result["content"] == "Sure, calling tool."
+        assert len(result["tool_calls"]) == 1
+        assert result["tool_calls"][0]["function"]["name"] == "hello"
+
+def test_llm_client_chat_with_tools_normalizes_done_reason():
+    """
+    Test that request_with_tools extracts finish_reason from the top-level
+    done_reason when finish_reason is missing from choices (e.g. some local models).
+    """
+    ctx = MagicMock()
+    client = LlmClient({"endpoint": "http://test", "model": "test-model"}, ctx)
+
+    mock_response = MagicMock()
+    mock_response.status = 200
+    mock_response.read.return_value = json.dumps({
+        "done_reason": "stop",
+        "message": {
+            "role": "assistant",
+            "content": "Done reasoning."
+        }
+    }).encode("utf-8")
+
+    with patch.object(client._transport, "send", return_value=mock_response):
+        result = client.request_with_tools([{"role": "user", "content": "Hi"}])
+
+        assert result["finish_reason"] == "stop"
+        assert result["content"] == "Done reasoning."
+
+def test_format_error_message_edge_cases():
+    """
+    Test error mapping edge cases for TLS and custom JSON error bodies.
+    """
+    # SSLError is mapped to a friendly message
+    err = ssl.SSLError("cert error")
+    assert "TLS/SSL Error:" in format_error_message(err)
+    assert "cert error" in format_error_message(err)
+
+    # test JSON decoding in _format_http_error_response
+    # Valid JSON with error message object
+    json_err_1 = '{"error": {"message": "Custom auth error"}}'
+    msg_1 = _format_http_error_response(401, "Unauthorized", json_err_1)
+    assert "Custom auth error" in msg_1
+    assert "HTTP Error 401" in msg_1
+
+    # Valid JSON but missing standard error field (fallback to snippet)
+    json_err_2 = '{"foo": "bar"}'
+    msg_2 = _format_http_error_response(401, "Unauthorized", json_err_2)
+    assert '{"foo": "bar"}' in msg_2
+
+    # Broken JSON fallback to snippet
+    broken_json = '{ "broken json'
+    msg_3 = _format_http_error_response(400, "Bad Request", broken_json)
+    assert '{ "broken json' in msg_3
+
+    # Together AI: error.message is a nested object (must not raise TypeError on concat)
+    together_err = json.dumps({
+        "id": "test-id",
+        "error": {
+            "message": {
+                "message": "Invalid JSON data: Failed to deserialize the JSON body into the target type: messages[1]: data did not match any variant of untagged enum MessageContent",
+                "type": "invalid_request_error",
+                "code": "json_data_error",
+            },
+            "type": "invalid_request_error",
+        },
+    })
+    msg_4 = _format_http_error_response(400, "Bad Request", together_err)
+    assert "HTTP Error 400" in msg_4
+    assert "MessageContent" in msg_4 or "deserialize" in msg_4
+
+    # Chat path uses this helper, not format_error_message(HTTPError).
+    json_429 = '{"error": {"message": "mock LLM soak failure", "type": "rate_limit_error"}}'
+    msg_429 = _format_http_error_response(429, "Too Many Requests", json_429)
+    assert "Rate limited" in msg_429
+    assert "429" in msg_429
+    assert "mock LLM soak failure" in msg_429
+    assert "HTTP Error 429 from AI Provider" not in msg_429

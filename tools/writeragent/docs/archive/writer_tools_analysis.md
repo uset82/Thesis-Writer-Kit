@@ -1,0 +1,145 @@
+# Writer Tools Consolidation Analysis
+
+## Current State: 48 Tool Classes across 18 Files
+
+| File | Tools | Lines | Bytes |
+|------|-------|-------|-------|
+| [bookmarks.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/bookmarks.py) | BookmarkList, BookmarkCleanup | 51 | 1.8K |
+| [comments.py](../../plugin/writer/comments.py) | CommentList, AddComment, CommentDelete, CommentResolve, workflow | 548 | 19.1K |
+| [content.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/content.py) | GetDocumentContent, ApplyDocumentContent, FindText, ReadParagraphs, InsertAtParagraph, SetParagraphText, SetParagraphStyle, DeleteParagraph, DuplicateParagraph, CloneHeadingBlock, InsertParagraphsBatch | 1032 | 36.4K |
+| [format.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/format.py) | *(helper module, no tools)* | 580 | 20.2K |
+| [frames.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/frames.py) | FrameList, FrameGetInfo, FrameSetProperties | 276 | 9.1K |
+| [fulltext.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/fulltext.py) | SearchFulltext, GetIndexStats | 160 | 5.5K |
+| [images.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/images.py) | ImageGenerate, EditImage | 123 | 3.6K |
+| [images_doc.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/images_doc.py) | ImageList, ImageGetInfo, ImageSetProperties, ImageDownload, ImageInsert, ImageDelete, ImageReplace | 729 | 24.1K |
+| [navigation.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/navigation.py) | NavHeading, NavSurroundings | 90 | 3.1K |
+| [outline.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/outline.py) | GetDocumentOutline, GetHeadingContent | 181 | 5.6K |
+| [search.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/search.py) | SearchInDocument, ReplaceInDocument | 241 | 8.1K |
+| [stats.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/stats.py) | GetDocumentStats | 83 | 2.3K |
+| [structural.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/structural.py) | SectionList, NavGotoPage, GetPageObjects, RefreshIndexes, SectionRead, BookmarkResolve, UpdateFields | 372 | 13.4K |
+| [styles.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/styles.py) | StyleList, StyleGetInfo | 151 | 4.3K |
+| [tables.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/tables.py) | TableList, ReadTable, WriteTableCell, CreateTable | 279 | 8.8K |
+| [tracking.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/tracking.py) | SetTrackChanges, GetTrackedChanges, AcceptAllChanges, RejectAllChanges | 152 | 4.6K |
+| [tree.py](../../plugin/writer/tree.py) | *(service only; tools in outline.py)* | 496 | 19.6K |
+
+**Total: ~5,300 lines, ~178KB** (approximate; per-file sizes drift with development)
+
+---
+
+## Proposed Consolidations
+
+### 1. [outline.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/outline.py) + [tree.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/tree.py) → **[outline.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/outline.py)** (high overlap)
+
+Both deal with heading/outline navigation. The overlap is significant:
+
+| outline.py | tree.py | Overlap |
+|---|---|---|
+| `get_document_outline` | `get_document_tree` | Both build the heading tree — `get_document_tree` is the richer version with bookmarks and content strategies |
+| `get_heading_content` | `nav_heading_children` | Both drill into heading content — `nav_heading_children` is richer with locator support |
+
+**Proposal:** Merge into [outline.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/outline.py). Keep `get_document_tree` and `nav_heading_children` as the canonical tools. `get_document_outline` can become a thin wrapper or be absorbed into `get_document_tree` with a [format](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/format.py#30-43) parameter. `get_heading_content` can be absorbed into `nav_heading_children`.
+
+**Savings:** ~2 tool classes eliminated, 1 file removed (~94 lines)
+
+---
+
+### 2. [search.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/search.py) overlaps with [content.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/content.py)'s [FindText](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/content.py#262-308)
+
+- `content.py::FindText` — finds text, returns `{start, end, text}` positions
+- `search.py::SearchInDocument` — finds text, returns paragraph context
+- Both use pattern matching on document text
+
+**Proposal:** Merge [FindText](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/content.py#262-308) into [SearchInDocument](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/search.py#10-140) by adding a `return_offsets` parameter. The caller chooses whether they want character offsets or paragraph context. Remove [FindText](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/content.py#262-308) from [content.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/content.py).
+
+**Savings:** ~1 tool class eliminated, ~45 lines
+
+---
+
+### 3. [images.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/images.py) + [images_doc.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/images_doc.py) → **[images.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/images.py)** (split is artificial)
+
+Currently split into:
+- [images.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/images.py) — AI-powered image generation/editing (2 tools)
+- [images_doc.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/images_doc.py) — Document image management (7 tools)
+
+**Proposal:** Merge into a single [images.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/images.py). The AI generation tools are just 2 small classes that work directly with images. There's no good reason for the split.
+
+**Savings:** 1 file removed, ~20 lines of imports/boilerplate
+
+---
+
+### 4. [bookmarks.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/bookmarks.py) → fold into [structural.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/structural.py)
+
+[bookmarks.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/bookmarks.py) has 2 small tools (51 lines):
+- [BookmarkList](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/bookmarks.py#6-34) — lists bookmarks
+- [BookmarkCleanup](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/bookmarks.py#36-51) — removes `_mcp_*` bookmarks
+
+[structural.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/structural.py) already has [BookmarkResolve](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/structural.py#254-336). All three are bookmark operations.
+
+**Proposal:** Move [BookmarkList](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/bookmarks.py#6-34) and [BookmarkCleanup](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/bookmarks.py#36-51) into [structural.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/structural.py) (renaming it or keeping the name). Delete [bookmarks.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/bookmarks.py).
+
+**Savings:** 1 file removed, ~10 lines of boilerplate
+
+---
+
+### 5. ~~MCP-AI paragraph summaries~~ (removed, do not merge)
+
+WriterAgent does not ship a separate `annotations.py`. The optional MCP-AI annotation tools (`add_ai_summary`, `get_ai_summaries`, `remove_ai_summary`) and the `ai_summary_first` heading-tree content strategy were **removed**; outline navigation uses `get_document_tree` / `nav_heading_children` with `content_strategy` in `heading_only`, `first_lines`, or `full` only. Implementation: [`plugin/writer/outline.py`](../../plugin/writer/outline.py), [`plugin/writer/tree.py`](../../plugin/writer/tree.py), [`plugin/writer/comments.py`](../../plugin/writer/comments.py).
+
+---
+
+### 6. [stats.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/stats.py) → fold into [content.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/content.py)
+
+[stats.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/stats.py) has a single tool, [GetDocumentStats](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/stats.py#10-74) (83 lines). It reads character/word/paragraph/page/heading counts — all document content metadata.
+
+**Proposal:** Move [GetDocumentStats](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/stats.py#10-74) into [content.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/content.py). Delete [stats.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/stats.py).
+
+**Savings:** 1 file removed, ~10 lines of boilerplate
+
+---
+
+### 7. ~~Accept/Reject track-change tools → `manage_tracked_changes`~~ (done)
+
+Implemented as `ManageTrackedChanges` in [tracking.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/tracking.py) with
+`action` = `accept` / `reject` / `accept_all` / `reject_all` (optional `index` for single).
+
+---
+
+### 8. [fulltext.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/fulltext.py) → fold into [search.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/search.py)
+
+[fulltext.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/fulltext.py) provides [SearchFulltext](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/fulltext.py#6-106) and [GetIndexStats](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/fulltext.py#146-160), both search-related. Combined with [search.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/search.py) (which already has [SearchInDocument](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/search.py#10-140) and [ReplaceInDocument](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/search.py#157-241)), this makes a single coherent "search" module.
+
+**Proposal:** Merge [fulltext.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/fulltext.py) into [search.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/search.py). Delete [fulltext.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/fulltext.py).
+
+**Savings:** 1 file removed, ~10 lines of boilerplate
+
+---
+
+## Summary of Results
+
+| Consolidation | Files Removed | Tools Reduced | Lines Saved (est.) |
+|---|---|---|---|
+| outline + tree → outline | 1 | 2 | ~100 |
+| FindText → SearchInDocument | 0 | 1 | ~45 |
+| images + images_doc → images | 1 | 0 | ~20 |
+| bookmarks → structural | 1 | 0 | ~10 |
+| stats → content | 1 | 0 | ~10 |
+| Accept/Reject → single tool | 0 | 1 | ~25 |
+| fulltext → search | 1 | 0 | ~10 |
+| **Totals** | **5 files** | **4 tools** | **~220 lines** |
+
+**After consolidation:** counts in the table above are planning estimates only. MCP-AI summary tooling is not part of the codebase.
+
+> [!NOTE]
+> The big content files ([content.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/content.py) at 1032 lines, [comments.py](../../plugin/writer/comments.py) at 548 lines, [images_doc.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/images_doc.py) at 729 lines) are already large. The proposed merges keep them from getting unwieldy — the largest merge adds ~160 lines to [search.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/search.py) for fulltext.
+
+> [!IMPORTANT]
+> The format.py and html_import.py helper modules are not tool files and should remain as-is. They provide shared utilities used across multiple tool files.
+
+## Not Recommended
+
+These were considered but rejected:
+
+- **Merging [frames.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/frames.py) into [content.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/content.py)** — [content.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/content.py) is already 1032 lines; frames are a distinct enough concept
+- **Merging [tables.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/tables.py) into [content.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/content.py)** — same size concern; tables have unique cell-addressing semantics  
+- **Merging [navigation.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/navigation.py) into [outline.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/outline.py)** — navigation uses ProximityService while outline uses TreeService/DocumentService; different abstractions
+- **Merging [tracking.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/tracking.py) into [comments.py](file:///home/keithcu/Desktop/Python/writeragent/plugin/writer/comments.py)** — tracked changes vs comments are different UNO subsystems despite both being "review" intent

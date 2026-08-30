@@ -1,0 +1,59 @@
+# Configuration files with secrets
+localwriter.json
+
+# Build artifacts
+build/
+bin/opengrep
+vendor/
+*.oxt
+*.pyc
+__pycache__/
+onlyofficeai*/
+plugin/lib/
+# System files
+.DS_Store
+*.swp
+*.swo
+*~
+*.mo
+
+.venv/
+
+# Log files
+writeragent_debug.log
+writeragent_history.db*
+writeragent_web_cache.db*
+soffice-debug.log
+Kyber_Complete_v24*/
+# IDE files
+.vscode/
+.idea/
+*.sublime-*
+
+# Temporary files
+*.tmp
+
+# Vendor or external components
+libre_calc_ai*/
+loshd*/
+libreoffice-mcp*/
+litellm*/
+langchain*/
+build*/
+vendor*/
+*.egg-info/
+writeragent.egg*/
+extension/META-INF/manifest.xml
+uv.lock
+
+_manifest.py
+description.xml
+.coverage
+
+# Accidentally added directories
+LibreAI/
+cursor-libreoffice/
+libreoffice-skill-repo/
+lightproof/
+python_libre_pythonista_ext/
+gpt-researcher/

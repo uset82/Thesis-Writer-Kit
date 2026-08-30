@@ -1,0 +1,587 @@
+import pytest
+
+import deal
+from plugin.chatbot.tool_loop_state import (
+    _describe_empty_response_tool_calls,
+    ToolLoopState,
+    ToolLoopEvent,
+    EventKind,
+    SpawnLLMWorkerEffect,
+    SpawnToolWorkerEffect,
+    ToolLoopUIEffect,
+    AddMessageEffect,
+    UpdateActivityStateEffect,
+    ExitLoopEffect,
+    TriggerNextToolEffect,
+    SpawnFinalStreamEffect,
+    UpdateDocumentContextEffect,
+    CleanupAudioEffect,
+    format_empty_model_response_debug,
+    format_tool_result_chat_text,
+    format_tool_running_ui,
+    is_replaced_zero_result,
+    next_state,
+    object_dict_or_empty,
+    pending_tool_call_fields,
+    stopped_effects_exclude_tool_spawns,
+)
+
+# --- Helpers ---
+def create_base_state(round_num=0, pending_tools=None, max_rounds=5, is_stopped=False):
+    return ToolLoopState(
+        round_num=round_num,
+        pending_tools=pending_tools or [],
+        max_rounds=max_rounds,
+        status="Ready",
+        is_stopped=is_stopped,
+        async_tools=frozenset(["web_research", "image_generate"])
+    )
+
+def create_event(kind: EventKind, **kwargs):
+    return ToolLoopEvent(kind=kind, data=kwargs)
+
+# --- Tests ---
+
+def test_stop_requested():
+    state = create_base_state()
+    event = create_event(EventKind.STOP_REQUESTED)
+    tr = next_state(state, event)
+    new_state, effects = tr.state, tr.effects
+
+    assert new_state.is_stopped is True
+    assert new_state.status == "Stopped"
+
+    assert any(isinstance(e, ExitLoopEffect) for e in effects)
+    assert any(isinstance(e, AddMessageEffect) for e in effects)
+    assert any(isinstance(e, ToolLoopUIEffect) and e.kind == "status" and e.text == "Stopped" for e in effects)
+
+def test_final_done():
+    state = create_base_state()
+    event = create_event(EventKind.FINAL_DONE, content="Final words")
+    tr = next_state(state, event)
+    new_state, effects = tr.state, tr.effects
+
+    assert new_state.status == "Ready"
+    assert any(isinstance(e, ExitLoopEffect) for e in effects)
+    
+    msg_effect = next(e for e in effects if isinstance(e, AddMessageEffect))
+    assert msg_effect.content == "Final words"
+    assert msg_effect.role == "assistant"
+
+
+def test_final_done_empty_content_skips_add_message():
+    state = create_base_state()
+    tr = next_state(state, create_event(EventKind.FINAL_DONE, content=""))
+    assert tr.state.status == "Ready"
+    assert any(isinstance(e, ExitLoopEffect) for e in tr.effects)
+    assert not any(isinstance(e, AddMessageEffect) for e in tr.effects)
+
+    tr_missing = next_state(state, create_event(EventKind.FINAL_DONE))
+    assert tr_missing.state.status == "Ready"
+    assert any(isinstance(e, ExitLoopEffect) for e in tr_missing.effects)
+    assert not any(isinstance(e, AddMessageEffect) for e in tr_missing.effects)
+
+
+def test_stream_done_with_audio_emits_cleanup_audio():
+    state = create_base_state()
+    event = create_event(
+        EventKind.STREAM_DONE,
+        response={"finish_reason": "stop", "content": "hi"},
+        has_audio=True,
+    )
+    tr = next_state(state, event)
+    assert any(isinstance(e, CleanupAudioEffect) for e in tr.effects)
+    assert any(isinstance(e, ExitLoopEffect) for e in tr.effects)
+
+
+def test_error_event():
+    state = create_base_state()
+    event = create_event(EventKind.ERROR, error=Exception("Something broke"))
+    tr = next_state(state, event)
+    new_state, effects = tr.state, tr.effects
+
+    assert new_state.status == "Error"
+    assert any(isinstance(e, ExitLoopEffect) for e in effects)
+
+def test_stream_done_finish_reasons():
+    state = create_base_state()
+    
+    # finish_reason="length"
+    event_len = create_event(EventKind.STREAM_DONE, response={"finish_reason": "length", "content": None})
+    tr_len = next_state(state, event_len)
+    new_state_len, effects_len = tr_len.state, tr_len.effects
+    assert new_state_len.status == "Ready"
+    assert any(isinstance(e, ToolLoopUIEffect) and "out of tokens" in e.text for e in effects_len)
+    msg_len = next(e for e in effects_len if isinstance(e, AddMessageEffect))
+    assert "out of tokens" in msg_len.content
+
+    # finish_reason="content_filter"
+    event_filt = create_event(EventKind.STREAM_DONE, response={"finish_reason": "content_filter", "content": None})
+    tr_filt = next_state(state, event_filt)
+    _new_state_filt, effects_filt = tr_filt.state, tr_filt.effects
+    assert any(isinstance(e, ToolLoopUIEffect) and "Content filter" in e.text for e in effects_filt)
+    msg_filt = next(e for e in effects_filt if isinstance(e, AddMessageEffect))
+    assert "Content filter" in msg_filt.content
+
+def test_stream_done_no_text_includes_debug_sidebar():
+    state = create_base_state(round_num=2)
+    response = {"finish_reason": "stop", "content": None, "usage": {"completion_tokens": 0}}
+    event = create_event(EventKind.STREAM_DONE, response=response)
+    tr = next_state(state, event)
+    effects = tr.effects
+
+    append_texts = [e.text for e in effects if isinstance(e, ToolLoopUIEffect) and e.kind == "append"]
+    assert any("No text from model" in t for t in append_texts)
+    debug_line = next(t for t in append_texts if t.startswith("\n[Debug: round="))
+    assert "finish_reason='stop'" in debug_line
+    assert "round=2" in debug_line
+    assert "completion_tokens" in debug_line
+    assert format_empty_model_response_debug(2, response) in debug_line
+    msg = next(e for e in effects if isinstance(e, AddMessageEffect))
+    assert "No text from model" in msg.content
+    assert "finish_reason='stop'" in msg.content
+
+
+def test_format_empty_model_response_debug_overflow_pre_fails_closed():
+    import pytest
+
+    import deal
+    from tests.strip_bundle import deal_pre_present
+
+    if not deal_pre_present(format_empty_model_response_debug):
+        pytest.skip("@deal.pre stripped in release bundle")
+    with pytest.raises(deal.PreContractError):
+        format_empty_model_response_debug(10_001, {})
+    assert "round=10000" in format_empty_model_response_debug(10_000, {})
+
+
+def test_format_empty_model_response_debug_content_empty_vs_none():
+    none_note = format_empty_model_response_debug(0, {"content": None})
+    assert "content=None" in none_note
+    empty_note = format_empty_model_response_debug(0, {"content": ""})
+    assert "content=empty" in empty_note
+
+
+def test_stream_done_empty_tool_calls():
+    state = create_base_state()
+    # explicitly testing empty list
+    event = create_event(EventKind.STREAM_DONE, response={"tool_calls": [], "content": "I couldn't figure it out."})
+    tr = next_state(state, event)
+    new_state, effects = tr.state, tr.effects
+
+    assert new_state.status == "Ready"
+    assert any(isinstance(e, ExitLoopEffect) for e in effects)
+    msg_eff = next((e for e in effects if isinstance(e, AddMessageEffect)), None)
+    assert msg_eff is not None
+    assert msg_eff.content == "I couldn't figure it out."
+    assert msg_eff.tool_calls is None
+
+def test_stream_done_with_tool_calls():
+    state = create_base_state()
+    tool_calls = [{"id": "1", "function": {"name": "test"}}]
+    event = create_event(EventKind.STREAM_DONE, response={"tool_calls": tool_calls, "content": "Let me test."})
+    tr = next_state(state, event)
+    new_state, effects = tr.state, tr.effects
+
+    assert len(new_state.pending_tools) == 1
+    assert any(isinstance(e, TriggerNextToolEffect) for e in effects)
+    msg_eff = next((e for e in effects if isinstance(e, AddMessageEffect)), None)
+    assert msg_eff.content == "Let me test."
+    assert msg_eff.tool_calls == tool_calls
+
+
+def test_stream_done_with_tool_calls_preserves_reasoning_replay():
+    state = create_base_state()
+    tool_calls = [{"id": "1", "function": {"name": "apply_document_content"}}]
+    response = {
+        "tool_calls": tool_calls,
+        "content": "Updating doc.",
+        "reasoning": "I will replace the section.",
+    }
+    event = create_event(EventKind.STREAM_DONE, response=response)
+    tr = next_state(state, event)
+    msg_eff = next(e for e in tr.effects if isinstance(e, AddMessageEffect))
+    assert msg_eff.reasoning_replay == {"reasoning": "I will replace the section."}
+
+
+def test_next_tool_advances_round_and_handles_max_rounds():
+    # Regular advance
+    state = create_base_state(round_num=3, max_rounds=5)
+    event = create_event(EventKind.NEXT_TOOL)
+    tr = next_state(state, event)
+    new_state, effects = tr.state, tr.effects
+    
+    assert new_state.round_num == 4
+    spawn_eff = next((e for e in effects if isinstance(e, SpawnLLMWorkerEffect)), None)
+    assert spawn_eff is not None
+    assert spawn_eff.round_num == 4
+    assert not any(isinstance(e, SpawnFinalStreamEffect) for e in effects)
+
+    # Exhausted advance
+    state_exhausted = create_base_state(round_num=4, max_rounds=5)
+    tr_ex = next_state(state_exhausted, event)
+    new_state_ex, effects_ex = tr_ex.state, tr_ex.effects
+    assert new_state_ex.round_num == 5
+    assert not any(isinstance(e, SpawnLLMWorkerEffect) for e in effects_ex)
+    assert any(isinstance(e, SpawnFinalStreamEffect) for e in effects_ex)
+
+def test_next_tool_invalid_max_rounds():
+    # If round_num somehow exceeds max_rounds, it caps to current round_num to prevent going back
+    state = create_base_state(round_num=5, max_rounds=2)
+    event = create_event(EventKind.NEXT_TOOL)
+    tr = next_state(state, event)
+    new_state, effects = tr.state, tr.effects
+    assert new_state.round_num == 5
+    assert any(isinstance(e, SpawnFinalStreamEffect) for e in effects)
+
+def test_next_tool_upsert_memory_shows_key_and_value_in_chat_line():
+    tool_calls = [
+        {
+            "id": "call_1",
+            "function": {
+                "name": "upsert_memory",
+                "arguments": '{"key": "my_key", "content": "my_val"}',
+            },
+        }
+    ]
+    state = create_base_state(pending_tools=tool_calls)
+    tr = next_state(state, create_event(EventKind.NEXT_TOOL))
+    effects = tr.effects
+    append_eff = next(
+        e for e in effects if isinstance(e, ToolLoopUIEffect) and e.kind == "append"
+    )
+    assert "my_key" in append_eff.text
+    assert "my_val" in append_eff.text
+    assert "Memory update" in append_eff.text
+
+
+def test_next_tool_with_pending_tools_and_action_state():
+    tool_calls = [{"id": "call_1", "function": {"name": "test_tool", "arguments": "{}"}}]
+    state = create_base_state(pending_tools=tool_calls)
+    event = create_event(EventKind.NEXT_TOOL)
+    tr = next_state(state, event)
+    new_state, effects = tr.state, tr.effects
+    
+    # Consumed 1 tool
+    assert len(new_state.pending_tools) == 0
+    
+    spawn_eff = next(e for e in effects if isinstance(e, SpawnToolWorkerEffect))
+    assert spawn_eff.func_name == "test_tool"
+    
+    # Check activity state effect
+    activity_eff = next(e for e in effects if isinstance(e, UpdateActivityStateEffect))
+    assert activity_eff.action == "tool_execute"
+    assert activity_eff.tool_name == "test_tool"
+
+def test_next_tool_malformed_arguments_and_missing_func():
+    # If we have a pending tool with malformed arguments, it should parse as empty dict
+    tool_calls = [{"id": "call_1", "type": "function", "function": {"arguments": "invalid-json"}}]
+    state = create_base_state(pending_tools=tool_calls)
+    event = create_event(EventKind.NEXT_TOOL)
+    tr = next_state(state, event)
+    new_state, effects = tr.state, tr.effects
+    
+    assert len(new_state.pending_tools) == 0
+    
+    spawn_eff = next(e for e in effects if isinstance(e, SpawnToolWorkerEffect))
+    assert spawn_eff.func_name == "unknown" # Missing name defaults to unknown
+    assert spawn_eff.func_args == {}  # Handled parsing failure
+    assert spawn_eff.func_args_str == "invalid-json"
+
+def test_next_tool_delegate_gateway_shows_domain_and_task():
+    long_task = "Fix the chart legend and axis labels. " * 20
+    tool_calls = [
+        {
+            "id": "call_delegate",
+            "function": {
+                "name": "delegate_to_specialized_writer_toolset",
+                "arguments": '{"domain": "styles", "task": "' + long_task.replace('"', '\\"') + '"}',
+            },
+        }
+    ]
+    state = create_base_state(pending_tools=tool_calls)
+    tr = next_state(state, create_event(EventKind.NEXT_TOOL))
+    effects = tr.effects
+    append_eff = next(e for e in effects if isinstance(e, ToolLoopUIEffect) and e.kind == "append")
+    status_eff = next(e for e in effects if isinstance(e, ToolLoopUIEffect) and e.kind == "status")
+    assert "delegate (styles)" in append_eff.text
+    assert "Fix the chart legend" in append_eff.text
+    assert "..." in append_eff.text
+    assert "delegate_to_specialized_writer_toolset" not in append_eff.text
+    assert status_eff.text == "Running: delegate (styles)"
+
+
+def test_tool_result_delegate_gateway_shows_done():
+    state = create_base_state()
+    event = create_event(
+        EventKind.TOOL_RESULT,
+        call_id="call_delegate",
+        func_name="delegate_to_specialized_writer_toolset",
+        func_args_str='{"domain": "styles", "task": "Update heading styles"}',
+        result='{"status": "ok", "message": "Specialized task complete. Normal toolset restored."}',
+        mutates_document=False,
+    )
+    tr = next_state(state, event)
+    append_eff = next(e for e in tr.effects if isinstance(e, ToolLoopUIEffect) and e.kind == "append" and "delegate" in e.text)
+    assert append_eff.text == "[delegate (styles): done]\n"
+    assert "Normal toolset restored" not in append_eff.text
+
+
+def test_tool_result_delegate_gateway_error():
+    state = create_base_state()
+    event = create_event(
+        EventKind.TOOL_RESULT,
+        call_id="call_delegate",
+        func_name="delegate_to_specialized_calc_toolset",
+        func_args_str='{"domain": "charts", "task": "Add a chart"}',
+        result='{"status": "error", "message": "No specialized tools found for domain \'charts\'."}',
+        mutates_document=False,
+    )
+    tr = next_state(state, event)
+    append_eff = next(e for e in tr.effects if isinstance(e, ToolLoopUIEffect) and e.kind == "append" and "failed" in e.text)
+    assert append_eff.text.startswith("[delegate (charts) failed:")
+    assert "No specialized tools found" in append_eff.text
+
+
+def test_apply_document_content_debug_uses_structured_replaced_count():
+    # replaced_count == 0 but the message does NOT start with "Replaced 0 occurrence";
+    # only the structured field should trigger the debug-params line (proves the consumer
+    # reads replaced_count, not the message string).
+    state = create_base_state()
+    event = create_event(
+        EventKind.TOOL_RESULT,
+        call_id="c1",
+        func_name="apply_document_content",
+        func_args_str='{"target": "search", "old_content": "zzz"}',
+        result='{"status": "error", "message": "old_content not found in document.", "replaced_count": 0}',
+        mutates_document=True,
+    )
+    tr = next_state(state, event)
+    assert any(
+        isinstance(e, ToolLoopUIEffect) and e.kind == "append" and e.text.startswith("[Debug: params")
+        for e in tr.effects
+    )
+
+
+def test_apply_document_content_search_miss_skips_doc_context_refresh():
+    # Core anti silent-failure case: mutating tool + search no-op must not refresh [DOCUMENT CONTENT].
+    # status="error" (not ok) blocks UpdateDocumentContextEffect even when mutates_document=True.
+    state = create_base_state()
+    event = create_event(
+        EventKind.TOOL_RESULT,
+        call_id="c1b",
+        func_name="apply_document_content",
+        func_args_str='{"target": "search", "old_content": "zzz", "content": "BAR"}',
+        result='{"status": "error", "message": "old_content not found in document.", "replaced_count": 0}',
+        mutates_document=True,
+    )
+    tr = next_state(state, event)
+    assert not any(isinstance(e, UpdateDocumentContextEffect) for e in tr.effects)
+
+
+def test_apply_document_content_no_debug_when_replaced():
+    state = create_base_state()
+    event = create_event(
+        EventKind.TOOL_RESULT,
+        call_id="c2",
+        func_name="apply_document_content",
+        func_args_str='{"target": "search", "old_content": "foo"}',
+        result='{"status": "ok", "message": "Replaced 2 occurrence(s).", "replaced_count": 2}',
+        mutates_document=True,
+    )
+    tr = next_state(state, event)
+    assert not any(
+        isinstance(e, ToolLoopUIEffect) and e.kind == "append" and e.text.startswith("[Debug: params")
+        for e in tr.effects
+    )
+
+
+def test_stopped_effects_exclude_tool_spawns_predicate():
+    spawn = SpawnToolWorkerEffect(
+        call_id="c1",
+        func_name="noop",
+        func_args_str="{}",
+        func_args={},
+        is_async=False,
+    )
+    running = create_base_state(is_stopped=False)
+    stopped = create_base_state(is_stopped=True)
+    assert stopped_effects_exclude_tool_spawns(running, [spawn]) is True
+    assert stopped_effects_exclude_tool_spawns(stopped, [spawn]) is False
+    assert stopped_effects_exclude_tool_spawns(stopped, []) is True
+
+
+def test_next_tool_when_stopped():
+    # If is_stopped=True but empty pending_tools, it shouldn't update status
+    state = create_base_state(is_stopped=True)
+    event = create_event(EventKind.NEXT_TOOL)
+    tr = next_state(state, event)
+    _new_state, effects = tr.state, tr.effects
+    
+    assert not any(isinstance(e, ToolLoopUIEffect) and e.kind == "status" for e in effects)
+    assert any(isinstance(e, SpawnLLMWorkerEffect) for e in effects)
+
+
+def test_next_tool_when_stopped_with_pending_does_not_spawn_tool():
+    """Stopped-latched pending tools never spawn.
+
+    Deleting ``or state.is_stopped`` from NEXT_TOOL fails this. STREAM_DONE after
+    STOP may still append pending and emit TriggerNextToolEffect (see
+    test_stream_done_after_stop_may_append_and_trigger_next); that is allowed.
+    """
+    tool_calls = [{"id": "call_1", "function": {"name": "test_tool", "arguments": "{}"}}]
+    state = create_base_state(pending_tools=tool_calls, is_stopped=True)
+    tr = next_state(state, create_event(EventKind.NEXT_TOOL))
+    assert not any(isinstance(e, SpawnToolWorkerEffect) for e in tr.effects)
+    assert tr.state.pending_tools == tool_calls
+    assert tr.state.is_stopped is True
+
+
+def test_stream_done_after_stop_may_append_and_trigger_next():
+    """After STOP, STREAM_DONE with tool_calls may append + TriggerNextToolEffect.
+
+    The interpreter queues NEXT_TOOL; the FSM must still not emit SpawnToolWorkerEffect.
+    """
+    state = create_base_state(is_stopped=True)
+    tool_calls = [{"id": "1", "function": {"name": "test", "arguments": "{}"}}]
+    tr = next_state(
+        state,
+        create_event(EventKind.STREAM_DONE, response={"tool_calls": tool_calls, "content": "x"}),
+    )
+    assert tr.state.is_stopped is True
+    assert len(tr.state.pending_tools) == 1
+    assert any(isinstance(e, TriggerNextToolEffect) for e in tr.effects)
+    assert not any(isinstance(e, SpawnToolWorkerEffect) for e in tr.effects)
+
+def test_tool_result_parsing():
+    state = create_base_state()
+    
+    # Valid JSON tool result
+    event_valid = create_event(
+        EventKind.TOOL_RESULT,
+        call_id="call_x",
+        func_name="test_tool",
+        func_args_str="{}",
+        result='{"success": true, "message": "done"}',
+        mutates_document=True
+    )
+    tr_valid = next_state(state, event_valid)
+    _new_state, effects = tr_valid.state, tr_valid.effects
+    assert any(isinstance(e, TriggerNextToolEffect) for e in effects)
+    assert any(isinstance(e, UpdateDocumentContextEffect) for e in effects)  # is_success=True and mutates=True
+    
+    msg_eff = next(e for e in effects if isinstance(e, AddMessageEffect))
+    assert msg_eff.role == "tool"
+    assert msg_eff.call_id == "call_x"
+    assert msg_eff.content == '{"success": true, "message": "done"}'
+
+    # apply_document_content edge case output
+    event_adc = create_event(
+        EventKind.TOOL_RESULT,
+        call_id="call_y",
+        func_name="apply_document_content",
+        func_args_str='{"content": "' + ("A" * 1000) + '"}',
+        result='{"message": "Replaced 0 occurrences"}',
+        mutates_document=False
+    )
+    tr_adc = next_state(state, event_adc)
+    _new_state_adc, effects_adc = tr_adc.state, tr_adc.effects
+    
+    ui_effs = [e for e in effects_adc if isinstance(e, ToolLoopUIEffect)]
+    assert any("[Debug: params" in e.text for e in ui_effs)
+    # the 1000 'A's should be truncated to 800 + "..."
+    assert any("..." in e.text for e in ui_effs)
+    assert not any(isinstance(e, UpdateDocumentContextEffect) for e in effects_adc)  # mutates_document=False
+
+
+def test_object_dict_or_empty():
+    from collections import UserDict
+
+    d = {"a": 1}
+    assert object_dict_or_empty(d) is d
+    assert object_dict_or_empty(None) == {}
+    assert object_dict_or_empty("x") == {}
+    assert object_dict_or_empty([1]) == {}
+    assert object_dict_or_empty(UserDict({"a": 1})) == {}
+
+
+def test_pending_tool_call_fields():
+    assert pending_tool_call_fields({"id": "c1", "function": {"name": "foo", "arguments": "{}"}}) == ("foo", "{}", "c1")
+    assert pending_tool_call_fields(None) == ("unknown", "{}", "")
+    assert pending_tool_call_fields({"id": "c2"}) == ("unknown", "{}", "c2")
+    assert pending_tool_call_fields({"function": "bad"}) == ("unknown", "{}", "")
+
+
+def test_format_tool_running_ui():
+    status, line = format_tool_running_ui("read_cell_range", {})
+    assert status == "Running: read_cell_range"
+    assert line == "[Running tool: read_cell_range...]\n"
+
+    status, line = format_tool_running_ui("delegate_to_specialized_calc_toolset", {"domain": "charts", "task": "plot"})
+    assert "delegate (charts)" in status
+    assert line.startswith("[Running delegate (charts):")
+    assert line.endswith("\n")
+
+    status, line = format_tool_running_ui("upsert_memory", {"key": "k", "content": "v"})
+    assert status == "Running: upsert_memory"
+    assert "Memory update" in line
+    assert line.endswith("\n")
+
+
+def test_format_tool_result_chat_text_error_does_not_mutate_details():
+    details = {"code": 1, "traceback": "Traceback (most recent call last):\n  File x\n"}
+    result_data = {"status": "error", "message": "boom", "details": details}
+    text = format_tool_result_chat_text("my_tool", {}, result_data)
+    assert "[my_tool failed: boom]" in text
+    assert "Details:" in text
+    assert "Traceback:" in text
+    assert "traceback" in details  # not popped from caller's dict
+    assert details["code"] == 1
+
+
+def test_format_tool_result_chat_text_success_and_delegate():
+    assert format_tool_result_chat_text("my_tool", {}, {"status": "ok", "message": "done"}) == "[my_tool: done]\n"
+    text = format_tool_result_chat_text(
+        "delegate_to_specialized_writer_toolset",
+        {"domain": "styles"},
+        {"status": "ok"},
+    )
+    assert text == "[delegate (styles): done]\n"
+
+
+def test_is_replaced_zero_result():
+    assert is_replaced_zero_result({"replaced_count": 0}, "ok") is True
+    assert is_replaced_zero_result({}, "Replaced 0 occurrences") is True
+    assert is_replaced_zero_result({"replaced_count": 2}, "ok") is False
+    assert is_replaced_zero_result({}, 42) is False
+
+
+def test_empty_and_delegate_formatters_dropped_from_check_all_fqns():
+    """Deep check-all run 32840960268: engine traceback after 1:53 / Prev 56:34."""
+    from pathlib import Path
+
+    from tests.strip_bundle import skip_if_release_build
+
+    skip_if_release_build("scripts/ not in stripped release tree")
+    from scripts.crosshair_stream import cover_fqns_for_module
+
+    fqns = cover_fqns_for_module(Path("plugin/chatbot/tool_loop_state.py"), require_deal=True)
+    assert not any(f.endswith(".format_empty_model_response_debug") for f in fqns)
+    assert not any(f.endswith(".format_delegate_running_chat_line") for f in fqns)
+
+
+def test_describe_empty_response_tool_calls_pre_rejects_non_list() -> None:
+    """Vacuous ``not list`` pre let CrossHair explore arbitrary objects (~5s / 5753 lines)."""
+    from plugin.framework.deal_shim import DEAL_MAX_CMD_ARGS
+    from tests.strip_bundle import deal_pre_present
+
+    if not deal_pre_present(_describe_empty_response_tool_calls):
+        pytest.skip("@deal.pre stripped in release bundle")
+    assert _describe_empty_response_tool_calls(None) == "none"
+    assert _describe_empty_response_tool_calls([{"id": 1}]) == "1"
+    with pytest.raises(deal.PreContractError):
+        _describe_empty_response_tool_calls("not-a-list")
+    with pytest.raises(deal.PreContractError):
+        _describe_empty_response_tool_calls([{"k": 1}] * (DEAL_MAX_CMD_ARGS + 1))
+    with pytest.raises(deal.PreContractError):
+        _describe_empty_response_tool_calls(["not-a-dict"])

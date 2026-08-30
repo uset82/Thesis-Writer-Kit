@@ -1,0 +1,485 @@
+# WriterAgent - AI Writing Assistant for LibreOffice
+# Copyright (c) 2026 KeithCu
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Tests for the main AI grammar proofreader entry point, worker, and integration scenarios."""
+
+from __future__ import annotations
+
+import sys
+import types
+from typing import Any
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+# --- UNO Mocks for non-native tests ---
+
+def _ensure_module(name: str) -> types.ModuleType:
+    mod = sys.modules.get(name)
+    if mod is None:
+        mod = types.ModuleType(name)
+        sys.modules[name] = mod
+    return mod
+
+lang = _ensure_module("com.sun.star.lang")
+ling = _ensure_module("com.sun.star.linguistic2")
+text_mod = _ensure_module("com.sun.star.text")
+setattr(lang, "Locale", type("Locale", (), {}))
+setattr(lang, "XServiceDisplayName", type("XServiceDisplayName", (), {}))
+setattr(lang, "XServiceInfo", type("XServiceInfo", (), {}))
+setattr(lang, "XServiceName", type("XServiceName", (), {}))
+setattr(lang, "XComponent", type("XComponent", (), {}))
+setattr(ling, "XProofreader", type("XProofreader", (), {}))
+setattr(ling, "XSupportedLocales", type("XSupportedLocales", (), {}))
+setattr(text_mod, "TextMarkupType", type("TextMarkupType", (), {}))
+unohelper_mod = _ensure_module("unohelper")
+setattr(unohelper_mod, "Base", type("UnohelperBase", (object,), {}))
+setattr(
+    unohelper_mod,
+    "ImplementationHelper",
+    type(
+        "ImplementationHelper",
+        (),
+        {"addImplementation": lambda self, *_args, **_kwargs: None},
+    ),
+)
+
+# Mock uno module
+uno_mod = _ensure_module("uno")
+uno_mod.createUnoStruct = MagicMock()
+uno_mod.getConstantByName = MagicMock(return_value=4)  # PROOFREADING
+uno_mod.getComponentContext = MagicMock()
+
+class FakeBI:
+    def getWordBoundary(self, text, pos, locale, wordType, bDirection):
+        import re
+        res = MagicMock()
+        m = re.compile(r"\w+|\W+").match(text, pos)
+        if m:
+            res.startPos = pos + m.start()
+            res.endPos = pos + m.end()
+        else:
+            res.startPos = pos
+            res.endPos = len(text)
+        return res
+        
+    def endOfSentence(self, text, pos, locale):
+        import re
+        m = re.search(r'[.!?]', text[pos:])
+        if m:
+            return pos + m.end()
+        return len(text)
+
+@pytest.fixture(autouse=True)
+def mock_bi():
+    with patch("plugin.writer.locale.grammar_proofread_text.get_break_iterator_and_locale", return_value=(FakeBI(), "en-US")):
+        yield
+
+from plugin.writer.locale import ai_grammar_proofreader as proofreader
+from plugin.writer.locale import grammar_proofread_cache as gc
+from plugin.writer.locale.grammar_proofread_locale import (
+    GRAMMAR_PARTIAL_MIN_NONSPACE_CHARS,
+    count_nonspace_chars,
+    looks_complete_sentence,
+)
+from plugin.writer.locale.grammar_work_queue import GrammarWorkItem, GrammarWorkQueue
+from plugin.writer.locale.grammar_worker import run_llm_and_cache_batch
+
+
+def _run_llm_one(
+    ctx: Any,
+    text: str,
+    enqueue_seq: int,
+    inflight_key: str,
+    grammar_bcp47: str,
+    partial_sentence: bool = False,
+    **kwargs: Any,
+) -> None:
+    item = GrammarWorkItem(
+        ctx=ctx,
+        text=text,
+        grammar_bcp47=grammar_bcp47,
+        partial_sentence=partial_sentence,
+        doc_id="",
+        inflight_key=inflight_key,
+        enqueue_seq=enqueue_seq,
+    )
+    run_llm_and_cache_batch(
+        [item],
+        grammar_queue_instance=kwargs.get("grammar_queue_instance"),
+        original_bcp47=kwargs.get("original_bcp47", ""),
+    )
+# =============================================================================
+# Worker Tests (Mocked)
+# =============================================================================
+
+def test_uno_setup_teardown_preserves_string_grammar_provider() -> None:
+    from tests.writer.locale import test_ai_grammar_proofreader_uno as uno_tests
+
+    key = "doc.grammar_proofreader_enabled"
+    set_calls: list[tuple[str, Any]] = []
+
+    with (
+        patch.object(uno_tests, "get_config", side_effect=lambda requested: "harper" if requested == key else None),
+        patch.object(uno_tests, "set_config", side_effect=lambda requested, value: set_calls.append((requested, value))),
+        patch.object(uno_tests.gc, "cache_clear"),
+        patch.object(uno_tests.gc, "ignore_rules_clear"),
+    ):
+        saved = uno_tests.setup_grammar_proof_tests(MagicMock())
+        uno_tests.teardown_grammar_proof_tests(saved)
+
+    assert set_calls == [(key, "llm"), (key, "harper")]
+
+
+def test_worker_skips_when_agent_active_and_pause_enabled() -> None:
+    def _get_config(key: str):
+        if key == "doc.grammar_proofreader_enabled":
+            return "llm"
+        if key == "doc.grammar_proofreader_pause_during_agent":
+            return True
+        return None
+
+    def _get_config_bool(key: str) -> bool:
+        if key == "doc.grammar_proofreader_enabled":
+            return True
+        if key == "doc.grammar_proofreader_pause_during_agent":
+            return True
+        raise AssertionError(f"unexpected key: {key}")
+
+    with (
+        patch("plugin.framework.config.get_config", side_effect=_get_config),
+        patch("plugin.framework.config.get_config_int", return_value=0),
+        patch("plugin.framework.config.get_config_bool", side_effect=_get_config_bool),
+        patch("plugin.framework.queue_executor.is_agent_active", return_value=True),
+        patch("plugin.framework.client.llm_client.LlmClient") as client_cls,
+    ):
+        _run_llm_one(
+            ctx=None,
+            text="test",
+            enqueue_seq=3,
+            inflight_key="doc|en",
+            grammar_bcp47="en-US",
+        )
+    client_cls.assert_not_called()
+
+
+def test_worker_does_not_pause_local_provider_when_agent_active() -> None:
+    """Harper / LanguageTool / Vale keep checking while chat runs; pause is LLM-only."""
+
+    def _get_config(key: str):
+        if key == "doc.grammar_proofreader_enabled":
+            return "harper"
+        if key == "doc.grammar_proofreader_pause_during_agent":
+            return True
+        return None
+
+    def _get_config_bool(key: str) -> bool:
+        if key == "doc.grammar_proofreader_enabled":
+            return True
+        if key == "doc.grammar_proofreader_pause_during_agent":
+            return True
+        raise AssertionError(f"unexpected key: {key}")
+
+    with (
+        patch("plugin.framework.config.get_config", side_effect=_get_config),
+        patch("plugin.framework.config.get_config_int", return_value=0),
+        patch("plugin.framework.config.get_config_bool", side_effect=_get_config_bool),
+        patch("plugin.framework.queue_executor.is_agent_active", return_value=True),
+        patch("plugin.writer.locale.grammar_worker.run_grammar_check") as run_check,
+        patch(
+            "plugin.writer.locale.grammar_proofread_cache.cache_get_sentence",
+            return_value=None,
+        ),
+    ):
+        _run_llm_one(
+            ctx=None,
+            text="test",
+            enqueue_seq=3,
+            inflight_key="doc|en",
+            grammar_bcp47="en-US",
+        )
+    run_check.assert_called_once()
+
+
+def test_classify_errors_against_window_counts_before_in_after() -> None:
+    from plugin.writer.locale.ai_grammar_proofreader import classify_errors_against_window
+
+    errors = [
+        {"n_error_start": 2, "n_error_length": 3},
+        {"n_error_start": 20, "n_error_length": 4},
+        {"n_error_start": 40, "n_error_length": 2},
+        {"n_error_start": 18, "n_error_length": 5},
+    ]
+    cls = classify_errors_against_window(errors, 20, 30)
+    assert cls["before_window"] == 1
+    assert cls["in_window"] == 1
+    assert cls["after_window"] == 1
+    assert cls["straddle"] == 1
+    assert "2+3:before" in cls["error_spans"]
+    assert "20+4:in" in cls["error_spans"]
+    assert "40+2:after" in cls["error_spans"]
+    assert "18+5:straddle" in cls["error_spans"]
+
+
+def test_apply_proofreading_end_positions_skips_space_after_sentence() -> None:
+    from plugin.writer.locale.ai_grammar_proofreader import _apply_proofreading_end_positions
+    class Res:
+        nStartOfNextSentencePosition = 0
+        nBehindEndOfSentencePosition = 0
+    text = "Hi. Bye."
+    r = Res()
+    _apply_proofreading_end_positions(r, text, 3)
+    assert r.nStartOfNextSentencePosition == 4
+    assert r.nBehindEndOfSentencePosition == 4
+
+def test_apply_proofreading_end_positions_skips_tab_after_sentence() -> None:
+    from plugin.writer.locale.ai_grammar_proofreader import _apply_proofreading_end_positions
+    class Res:
+        nStartOfNextSentencePosition = 0
+        nBehindEndOfSentencePosition = 0
+    text = "Hi.\tBye."
+    r = Res()
+    _apply_proofreading_end_positions(r, text, 3)
+    assert r.nStartOfNextSentencePosition == 4
+    assert r.nBehindEndOfSentencePosition == 4
+
+def test_sentence_terminators_cover_multilingual_cases() -> None:
+    assert looks_complete_sentence("Hello world.")
+    assert looks_complete_sentence("مرحبا بالعالم？")
+    assert looks_complete_sentence("これは文です。")
+    assert looks_complete_sentence("यह एक वाक्य है।")
+    assert not looks_complete_sentence("incomplete clause")
+
+def test_partial_threshold_counts_nonspace_chars() -> None:
+    assert count_nonspace_chars("a b c") == 3
+    assert count_nonspace_chars("too short") < GRAMMAR_PARTIAL_MIN_NONSPACE_CHARS
+    assert count_nonspace_chars("this is long enough") >= GRAMMAR_PARTIAL_MIN_NONSPACE_CHARS
+
+def test_run_llm_skips_split_when_item_text_set() -> None:
+    def _get_config(key: str):
+        if key == "doc.grammar_proofreader_enabled": return "llm"
+        if key == "doc.grammar_proofreader_pause_during_agent": return False
+        return None
+    def _get_config_bool(key: str) -> bool:
+        if key == "doc.grammar_proofreader_enabled": return True
+        if key == "doc.grammar_proofreader_pause_during_agent": return False
+        raise AssertionError(f"unexpected key: {key}")
+    def _split_must_not_run(*_a, **_k): raise AssertionError("split_into_sentences must not run")
+    with (
+        patch("plugin.framework.config.get_config", side_effect=_get_config),
+        patch("plugin.framework.config.get_config_bool", side_effect=_get_config_bool),
+        patch("plugin.framework.config.get_config_str", return_value=""),
+        patch("plugin.framework.client.model_fetcher.get_text_model", return_value="m"),
+        patch("plugin.framework.config.get_api_config", return_value={}),
+        patch("plugin.framework.queue_executor.is_agent_active", return_value=False),
+        patch("plugin.framework.queue_executor.grammar_llm_request_gate") as lane_ctx,
+        patch("plugin.framework.client.llm_client.LlmClient") as client_cls,
+        patch("plugin.writer.locale.grammar_proofread_text.split_into_sentences", side_effect=_split_must_not_run),
+        patch("plugin.writer.locale.grammar_proofread_json.parse_grammar_json", return_value=[]),
+        patch("plugin.writer.locale.grammar_proofread_text.normalize_errors_for_text", return_value=[]),
+        patch("plugin.writer.locale.grammar_proofread_cache.cache_put_sentence"),
+    ):
+        lane_ctx.return_value.__enter__ = MagicMock()
+        lane_ctx.return_value.__exit__ = MagicMock()
+        client_cls.return_value.chat_completion_sync.return_value = '{"errors":[]}'
+        _run_llm_one(None, "Hello.", 1, "d|en", "en-US")
+
+def test_partial_sentence_adds_prompt_note() -> None:
+    def _get_config(key: str):
+        if key == "doc.grammar_proofreader_enabled": return "llm"
+        if key == "doc.grammar_proofreader_pause_during_agent": return False
+        return None
+    def _get_config_bool(key: str) -> bool:
+        if key == "doc.grammar_proofreader_enabled": return True
+        if key == "doc.grammar_proofreader_pause_during_agent": return False
+        raise AssertionError(f"unexpected key: {key}")
+    with (
+        patch("plugin.framework.config.get_config", side_effect=_get_config),
+        patch("plugin.framework.config.get_config_bool", side_effect=_get_config_bool),
+        patch("plugin.framework.config.get_config_str", return_value=""),
+        patch("plugin.framework.client.model_fetcher.get_text_model", return_value="m"),
+        patch("plugin.framework.config.get_api_config", return_value={}),
+        patch("plugin.framework.queue_executor.is_agent_active", return_value=False),
+        patch("plugin.framework.queue_executor.grammar_llm_request_gate") as lane_ctx,
+        patch("plugin.framework.client.llm_client.LlmClient") as client_cls,
+        patch("plugin.writer.locale.grammar_proofread_json.parse_grammar_json", return_value=[]),
+        patch("plugin.writer.locale.grammar_proofread_text.normalize_errors_for_text", return_value=[]),
+        patch("plugin.writer.locale.grammar_proofread_cache.cache_put_sentence"),
+    ):
+        lane_ctx.return_value.__enter__ = MagicMock()
+        lane_ctx.return_value.__exit__ = MagicMock()
+        client = client_cls.return_value
+        client.chat_completion_sync.return_value = '{"errors":[]}'
+        _run_llm_one(None, "This is long enough...", 0, "doc|en", "en-US", partial_sentence=True)
+    args, _ = client.chat_completion_sync.call_args
+    assert "partial sentence" in args[0][0]["content"]
+
+# =============================================================================
+# Integration Tests (Mocked typing patterns)
+# =============================================================================
+
+@pytest.fixture
+def mock_config_fixture():
+    with (
+        patch("plugin.framework.config.get_config") as mock_get_config,
+        patch("plugin.framework.config.get_config_bool") as mock_get_bool,
+        patch("plugin.framework.config.get_config_str") as mock_get_str,
+        patch("plugin.framework.config.get_config_int") as mock_get_int,
+        patch("plugin.framework.client.model_fetcher.get_text_model") as mock_get_model,
+        patch("plugin.framework.config.get_api_config") as mock_get_api,
+        patch("plugin.framework.logging.init_logging"),
+        patch.object(proofreader, "uno_mod", uno_mod),
+    ):
+        mock_get_config.side_effect = lambda key: {
+            "doc.grammar_proofreader_enabled": "llm",
+            "doc.grammar_proofreader_pause_during_agent": False,
+        }.get(key, None)
+        mock_get_bool.side_effect = lambda key: {
+            "doc.grammar_proofreader_enabled": True,
+            "doc.grammar_proofreader_pause_during_agent": False,
+        }.get(key, False)
+        mock_get_str.return_value = ""
+        mock_get_int.return_value = 0
+        mock_get_model.return_value = "test-model"
+        mock_get_api.return_value = {}
+        yield
+
+@pytest.fixture
+def mock_locale_fixture():
+    loc = MagicMock()
+    loc.Language = "en"
+    loc.Country = "US"
+    loc.Variant = ""
+    return loc
+
+@pytest.fixture
+def mock_queue_fixture():
+    mock_q = MagicMock(spec=GrammarWorkQueue)
+    with patch("plugin.writer.locale.ai_grammar_proofreader.grammar_queue", mock_q):
+        yield mock_q
+
+@pytest.fixture(autouse=True)
+def _reset_grammar_caches():
+    """Clear both the global LRU and the per-doc DocumentPersistence map.
+
+    Under ``USE_SQLITE_CACHE=False`` ``DocumentPersistence`` instances live in a
+    module-level dict keyed by doc id and would otherwise leak warm state across
+    tests (any test that reuses ``doc_id="test-doc"`` would see stale entries).
+    """
+    from plugin.writer.locale import grammar_persistence as gp
+
+    gc.cache_clear()
+    gp.grammar_registry.doc_persistence_instances.clear()
+    yield
+    gc.cache_clear()
+    gp.grammar_registry.doc_persistence_instances.clear()
+
+def _make_proofreader(ctx: Any = None) -> Any:
+    if ctx is None: ctx = MagicMock()
+    return proofreader.WriterAgentAiGrammarProofreader(ctx)
+
+class TestTypingIntegration:
+    def test_rapid_typing_deduplication(self, mock_config_fixture, mock_locale_fixture, mock_queue_fixture):
+        pr = _make_proofreader()
+        enqueued_items = []
+        mock_queue_fixture.enqueue.side_effect = lambda item: enqueued_items.append(item)
+        # For incomplete sentences, the key is stable even for short typing bursts
+        texts = ["The quick brown fox", "The quick brown fox j"]
+        for text in texts:
+            pr.doProofreading("test-doc", text, mock_locale_fixture, 0, len(text), ())
+        assert len(enqueued_items) >= 2
+        keys = {item.inflight_key for item in enqueued_items}
+        # Both share the 'INCOMPLETE_WRITER_AGENT_INTERNAL_STRING' key
+        assert len(keys) == 1
+        assert "INCOMPLETE_WRITER_AGENT_INTERNAL_STRING" in list(keys)[0]
+
+    def test_slow_typing_cache_hit(self, mock_config_fixture, mock_locale_fixture, mock_queue_fixture):
+        # Pass ctx + doc_id so write and read target the same cache layer under both
+        # USE_SQLITE_CACHE=True (global SQLite/JSON singleton) and USE_SQLITE_CACHE=False
+        # (per-doc DocumentPersistence keyed by doc_id). doProofreading reads with
+        # ctx=self.ctx, doc_id="test-doc"; the test must match that.
+        pr = _make_proofreader()
+        sentence = "The boy runs."
+        gc.cache_put_sentence("en-US", sentence, [{"n_error_start": 4, "n_error_length": 3, "rule_identifier": "r1"}], ctx=pr.ctx, doc_id="test-doc")
+        res = pr.doProofreading("test-doc", sentence, mock_locale_fixture, 0, len(sentence), ())
+        assert len(res.aErrors) == 1
+        mock_queue_fixture.enqueue.assert_not_called()
+
+    def test_paragraph_edit_middle_miss(self, mock_config_fixture, mock_locale_fixture, mock_queue_fixture):
+        pr = _make_proofreader()
+        sentences = ["First sentence.", "Second sentence.", "Third sentence."]
+        for sent in sentences:
+            gc.cache_put_sentence("en-US", sent, [{"n_error_start": 0, "n_error_length": 1, "rule_identifier": "r"}], ctx=pr.ctx, doc_id="test-doc")
+        edited_text = sentences[0] + " SecondX sentence. " + sentences[2]
+        enqueued_items = []
+        mock_queue_fixture.enqueue.side_effect = lambda item: enqueued_items.append(item)
+        with patch("plugin.writer.locale.grammar_proofread_text.split_into_sentences") as mock_split:
+            mock_split.return_value = [(0, sentences[0]), (len(sentences[0]) + 1, "SecondX sentence."), (len(sentences[0]) + 1 + len("SecondX sentence.") + 1, sentences[2])]
+            res = pr.doProofreading("test-doc", edited_text, mock_locale_fixture, 0, len(edited_text), ())
+        assert len(enqueued_items) == 1
+        assert len(res.aErrors) == 2
+
+    def test_partial_cache_hit_returns_cached_errors_and_enqueues_uncached(
+        self, mock_config_fixture, mock_locale_fixture, mock_queue_fixture
+    ) -> None:
+        """Characterization: partial miss returns cached squiggles immediately and enqueues only misses."""
+        pr = _make_proofreader()
+        s1, s2, s3 = "Alpha sentence.", "Beta sentence.", "Gamma sentence."
+        paragraph = f"{s1} {s2} {s3}"
+        gc.cache_put_sentence("en-US", s1, [{"n_error_start": 0, "n_error_length": 1, "rule_identifier": "r1"}], ctx=pr.ctx, doc_id="test-doc")
+        gc.cache_put_sentence("en-US", s3, [{"n_error_start": 0, "n_error_length": 1, "rule_identifier": "r3"}], ctx=pr.ctx, doc_id="test-doc")
+
+        enqueued_items: list[Any] = []
+        mock_queue_fixture.enqueue.side_effect = lambda item: enqueued_items.append(item)
+
+        with patch("plugin.writer.locale.grammar_proofread_text.split_into_sentences") as mock_split:
+            off2 = len(s1) + 1
+            off3 = off2 + len(s2) + 1
+            mock_split.return_value = [(0, s1), (off2, s2), (off3, s3)]
+            res = pr.doProofreading("test-doc", paragraph, mock_locale_fixture, 0, len(paragraph), ())
+
+        assert len(res.aErrors) == 2
+        assert len(enqueued_items) == 1
+        assert enqueued_items[0].text == s2
+
+    def test_do_proofreading_splits_paragraph_once(
+        self, mock_config_fixture, mock_locale_fixture, mock_queue_fixture
+    ) -> None:
+        pr = _make_proofreader()
+        paragraph = "Sentence one. Sentence two. Sentence three."
+        with patch.object(
+            proofreader,
+            "candidate_sentence_spans_for_proofreading",
+            wraps=proofreader.candidate_sentence_spans_for_proofreading,
+        ) as mock_split:
+            pr.doProofreading("test-doc", paragraph, mock_locale_fixture, 0, 10, ())
+        assert mock_split.call_count == 1
+
+    def test_do_proofreading_exception_returns_empty_result(
+        self, mock_config_fixture, mock_locale_fixture, mock_queue_fixture
+    ) -> None:
+        """Characterization: unexpected errors in span resolution return an empty result, not a crash."""
+        pr = _make_proofreader()
+        with patch.object(pr, "_resolve_work_spans", side_effect=RuntimeError("span resolution failed")):
+            res = pr.doProofreading("test-doc", "Hello.", mock_locale_fixture, 0, 6, ())
+        assert res.aErrors == ()
+        mock_queue_fixture.enqueue.assert_not_called()
+
+    def test_do_proofreading_marshals_persistence_bind_off_main_thread(
+        self, mock_config_fixture, mock_locale_fixture, mock_queue_fixture
+    ) -> None:
+        """LO linguistic workers call doProofreading off the UI thread; UNO bind must marshal."""
+        pr = _make_proofreader()
+        with (
+            patch("plugin.framework.thread_guard.on_main_thread", return_value=False),
+            patch(
+                "plugin.framework.queue_executor.execute_on_main_thread",
+                side_effect=lambda fn, *args, **kwargs: fn(*args, **kwargs),
+            ) as mock_exec,
+            patch("plugin.writer.locale.ai_grammar_proofreader._ensure_persistence_bound") as mock_bind,
+        ):
+            pr.doProofreading("test-doc", "Hello.", mock_locale_fixture, 0, 6, ())
+        mock_exec.assert_called_once()
+        assert mock_exec.call_args[0][1:] == (pr.ctx, "test-doc")
+        mock_bind.assert_called_once_with(pr.ctx, "test-doc")

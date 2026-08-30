@@ -1,0 +1,196 @@
+from unittest.mock import MagicMock
+
+from plugin.tests.testing_utils import TestingFactory, setup_uno_mocks
+
+setup_uno_mocks()
+
+# Set up BreakType PAGE_BEFORE constant explicitly if needed for the test
+import sys
+
+setattr(sys.modules["com.sun.star.style.BreakType"], "PAGE_BEFORE", 4)
+
+from plugin.writer.page import (
+    PageGetStyleProperties,
+    PageSetStyleProperties,
+    PageSetHeaderFooterText,
+    PageSetColumns,
+    PageInsertBreak,
+)
+
+
+def test_get_page_style_properties():
+    doc = MagicMock()
+    families = MagicMock()
+    page_styles = MagicMock()
+    style = MagicMock()
+
+    doc.getStyleFamilies.return_value = families
+    families.getByName.return_value = page_styles
+    page_styles.hasByName.return_value = True
+    page_styles.getByName.return_value = style
+
+    def get_prop(name):
+        props = {
+            "Width": 21000,
+            "Height": 29700,
+            "IsLandscape": False,
+            "LeftMargin": 2000,
+            "RightMargin": 2000,
+            "TopMargin": 2000,
+            "BottomMargin": 2000,
+            "GutterMargin": 0,
+            "HeaderIsOn": True,
+            "FooterIsOn": False,
+            "HeaderIsShared": True,
+            "FooterIsShared": True,
+            "HeaderHeight": 500,
+            "FooterHeight": 500,
+            "HeaderBodyDistance": 500,
+            "FooterBodyDistance": 500,
+            "BackColor": 16777215,
+            "BackTransparent": True,
+            "NumberingType": 4,
+            "FootnoteHeight": 0,
+            "RegisterParagraphStyle": "",
+            "PageStyleLayout": MagicMock(value=0),
+        }
+        return props[name]
+
+    style.getPropertyValue.side_effect = get_prop
+
+    ctx = TestingFactory.create_context(doc=doc, doc_type="writer")
+    tool = PageGetStyleProperties()
+    res = tool.execute(ctx, style="Standard")
+
+    assert res["status"] == "ok"
+    assert res["properties"]["width_mm"] == 210.0
+    assert res["properties"]["height_mm"] == 297.0
+    assert res["properties"]["header_is_on"] is True
+    assert res["properties"]["footer_is_on"] is False
+
+
+def test_set_page_style_properties():
+    doc = MagicMock()
+    families = MagicMock()
+    page_styles = MagicMock()
+    style = MagicMock()
+
+    doc.getStyleFamilies.return_value = families
+    families.getByName.return_value = page_styles
+    page_styles.hasByName.return_value = True
+    page_styles.getByName.return_value = style
+
+    ctx = TestingFactory.create_context(doc=doc, doc_type="writer")
+    tool = PageSetStyleProperties()
+    res = tool.execute(ctx, style="Standard", width_mm=300, is_landscape=True, header_is_on=False)
+
+    assert res["status"] == "ok"
+    assert "width" in res["updated"]
+    assert "is_landscape" in res["updated"]
+
+    style.setPropertyValue.assert_any_call("Width", 30000)
+    style.setPropertyValue.assert_any_call("IsLandscape", True)
+    style.setPropertyValue.assert_any_call("HeaderIsOn", False)
+
+
+def test_set_header_footer_text():
+    doc = MagicMock()
+    families = MagicMock()
+    page_styles = MagicMock()
+    style = MagicMock()
+
+    doc.getStyleFamilies.return_value = families
+    families.getByName.return_value = page_styles
+    page_styles.hasByName.return_value = True
+    page_styles.getByName.return_value = style
+
+    header_text_obj = MagicMock()
+    style.getPropertyValue.return_value = header_text_obj
+
+    ctx = TestingFactory.create_context(doc=doc, doc_type="writer")
+    tool = PageSetHeaderFooterText()
+    res = tool.execute(
+        ctx,
+        style="Standard",
+        region="header",
+        content="My Header Content",
+        auto_height=True,
+    )
+
+    assert res["status"] == "ok"
+    assert res["region"] == "header"
+    assert res["auto_height"] is True
+
+    style.setPropertyValue.assert_any_call("HeaderIsOn", True)
+    style.setPropertyValue.assert_any_call("HeaderIsDynamicHeight", True)
+    header_text_obj.setString.assert_called_with("My Header Content")
+
+
+def test_set_page_columns():
+    doc = MagicMock()
+    families = MagicMock()
+    page_styles = MagicMock()
+    style = MagicMock()
+    text_columns = MagicMock()
+
+    doc.getStyleFamilies.return_value = families
+    families.getByName.return_value = page_styles
+    page_styles.hasByName.return_value = True
+    page_styles.getByName.return_value = style
+    style.getPropertyValue.return_value = text_columns
+
+    col1 = MagicMock()
+    col2 = MagicMock()
+    text_columns.getColumns.return_value = (col1, col2)
+
+    ctx = TestingFactory.create_context(doc=doc, doc_type="writer")
+    tool = PageSetColumns()
+    res = tool.execute(ctx, style="Standard", column_count=2, spacing_mm=5)
+
+    assert res["status"] == "ok"
+    text_columns.setColumnCount.assert_called_with(2)
+
+    assert col1.RightMargin == 250
+    assert col2.LeftMargin == 250
+    text_columns.setColumns.assert_called_with((col1, col2))
+    style.setPropertyValue.assert_called_with("TextColumns", text_columns)
+
+
+def test_insert_page_break():
+    doc = MagicMock()
+    controller = MagicMock()
+    view_cursor = MagicMock()
+    text_obj = MagicMock()
+    text_cursor = MagicMock()
+
+    doc.getCurrentController.return_value = controller
+    controller.getViewCursor.return_value = view_cursor
+    view_cursor.getText.return_value = text_obj
+    text_obj.createTextCursorByRange.return_value = text_cursor
+
+    ctx = TestingFactory.create_context(doc=doc, doc_type="writer")
+    tool = PageInsertBreak()
+    res = tool.execute(ctx)
+
+    assert res["status"] == "ok"
+    text_cursor.setPropertyValue.assert_called_with("BreakType", 4)  # PAGE_BEFORE
+    text_obj.insertControlCharacter.assert_called_with(text_cursor, 0, False)
+
+
+def test_page_tools_shortened_style_param():
+    doc = MagicMock()
+    families = MagicMock()
+    page_styles = MagicMock()
+    style = MagicMock()
+    doc.getStyleFamilies.return_value = families
+    families.getByName.return_value = page_styles
+    page_styles.hasByName.return_value = True
+    page_styles.getByName.return_value = style
+
+    ctx = TestingFactory.create_context(doc=doc, doc_type="writer")
+    res = PageGetStyleProperties().execute(ctx, style="Standard")
+    assert res["status"] == "ok"
+    assert "properties" in res
+
+    res_set = PageSetStyleProperties().execute(ctx, style="Standard", width_mm=210)
+    assert res_set["status"] == "ok"

@@ -1,0 +1,669 @@
+# WriterAgent - AI Writing Assistant for LibreOffice
+# Copyright (c) 2026 KeithCu
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Tests for grammar text processing (sentence splitting, error normalization, offsets)."""
+
+from __future__ import annotations
+
+from plugin.writer.locale import grammar_proofread_text as gt
+
+import pytest
+from unittest.mock import MagicMock, patch
+
+# --- Mocks for non-native tests ---
+
+class FakeBI:
+    def getWordBoundary(self, text, pos, locale, wordType, bDirection):
+        import re
+        res = MagicMock()
+        m = re.compile(r"\w+|\W+").match(text, pos)
+        if m:
+            res.startPos = m.start()
+            res.endPos = m.end()
+        else:
+            res.startPos = pos
+            res.endPos = len(text)
+        return res
+        
+    def endOfSentence(self, text, pos, locale):
+        import re
+        m = re.search(r'[.!?]', text[pos:])
+        if m:
+            return pos + m.end()
+        return len(text)
+
+@pytest.fixture(autouse=True)
+def mock_bi():
+    with patch("plugin.writer.locale.grammar_proofread_text.get_break_iterator_and_locale", return_value=(FakeBI(), "en-US")):
+        yield
+
+# =============================================================================
+# Unit Tests (Mocked)
+# =============================================================================
+
+def test_normalize_errors_for_text() -> None:
+    full = "Hello they is here."
+    items = [{"wrong": "they is", "correct": "they are", "type": "grammar", "reason": "agr"}]
+    norms = gt.normalize_errors_for_text(full, 0, len(full), items)
+    assert len(norms) == 1
+    assert full[norms[0].n_error_start : norms[0].n_error_start + norms[0].n_error_length] == "they is"
+
+
+def test_normalize_errors_preserves_harper_rule_identifier() -> None:
+    full = "hello world."
+    items = [
+        {
+            "wrong": "hello",
+            "correct": "Hello",
+            "type": "SentenceCapitalization",
+            "reason": "Start with a capital letter.",
+            "rule_identifier": "harper||SentenceCapitalization",
+        }
+    ]
+    norms = gt.normalize_errors_for_text(full, 0, len(full), items)
+    assert len(norms) == 1
+    assert norms[0].rule_identifier == "harper||SentenceCapitalization"
+    assert norms[0].rule_identifier != "wa_g_rule||Start with a capital letter."
+
+
+def test_normalize_harper_errors_uses_native_offsets_and_explains_blank_fixes() -> None:
+    text = "can it    finded enny misteaks ?"
+    items = [
+        {
+            "wrong": "    ",
+            "correct": " ",
+            "n_error_start": 6,
+            "n_error_length": 4,
+            "type": "Spaces",
+            "reason": "There are 4 spaces where there should be only one.",
+            "short_comment": "There are 4 spaces where there should be only one.",
+            "full_comment": "There are 4 spaces where there should be only one.",
+            "rule_identifier": "harper||Spaces",
+            "suggestions": [" "],
+        },
+        {
+            "wrong": " ",
+            "correct": "",
+            "n_error_start": 30,
+            "n_error_length": 1,
+            "type": "Spaces",
+            "reason": "Unnecessary space at the end of the sentence.",
+            "short_comment": "Unnecessary space at the end of the sentence.",
+            "full_comment": "Unnecessary space at the end of the sentence.",
+            "rule_identifier": "harper||Spaces",
+            "suggestions": [""],
+        },
+        {
+            "wrong": "enny",
+            "correct": "envy",
+            "n_error_start": 17,
+            "n_error_length": 4,
+            "type": "SpellCheck",
+            "reason": "Did you mean to spell `enny` this way?",
+            "short_comment": "Did you mean to spell `enny` this way?",
+            "full_comment": "Did you mean to spell `enny` this way?",
+            "rule_identifier": "harper||SpellCheck",
+            "suggestions": ["envy", "jenny"],
+        },
+        {
+            "wrong": "finded",
+            "correct": "find ed",
+            "n_error_start": 10,
+            "n_error_length": 6,
+            "type": "SplitWords",
+            "reason": "`finded` should probably be written as `find ed`.",
+            "short_comment": "`finded` should probably be written as `find ed`.",
+            "full_comment": "`finded` should probably be written as `find ed`.",
+            "rule_identifier": "harper||SplitWords",
+            "suggestions": ["find ed", "found"],
+        },
+    ]
+
+    norms = gt.normalize_errors_for_text(text, 0, len(text), items)
+
+    assert [(item.n_error_start, item.n_error_length) for item in norms] == [(6, 4), (30, 1), (17, 4), (10, 6)]
+    assert norms[0].suggestions == (" ",)
+    assert "replace with one space" in norms[0].short_comment
+    assert norms[1].suggestions == ("",)
+    assert "delete the highlighted text" in norms[1].short_comment
+    assert norms[2].suggestions == ("envy", "jenny")
+    assert "Choose a replacement below" in norms[2].short_comment
+
+
+def test_provider_span_wrong_mismatch_falls_back_to_substring() -> None:
+    """Offsets that do not match ``wrong`` are ignored; substring search places the error."""
+    full = "xx they is yy"
+    items = [
+        {
+            "wrong": "they is",
+            "correct": "they are",
+            "n_error_start": 0,
+            "n_error_length": 3,
+            "type": "grammar",
+            "reason": "agreement",
+            "rule_identifier": "harper||Agreement",
+        }
+    ]
+    # Offsets claim "xx " but wrong is "they is" → mismatch → fall back.
+    assert gt._provider_error_span(full, items[0], "they is") is None
+    norms = gt.normalize_errors_for_text(full, 0, len(full), items)
+    assert len(norms) == 1
+    assert norms[0].n_error_start == 3
+    assert norms[0].n_error_length == 7
+
+
+def test_provider_span_missing_offsets_falls_back() -> None:
+    """LLM-style items without native offsets still normalize via substring search."""
+    full = "xx they is yy"
+    items = [{"wrong": "they is", "correct": "they are", "type": "grammar", "reason": "agreement"}]
+    assert gt._provider_error_span(full, items[0], "they is") is None
+    norms = gt.normalize_errors_for_text(full, 0, len(full), items)
+    assert len(norms) == 1
+    assert norms[0].n_error_start == 3
+    assert full[3:10] == "they is"
+
+
+def test_provider_span_rejects_bool_and_non_int() -> None:
+    """bool is a subclass of int in Python; the explicit guard must reject it."""
+    assert gt._provider_error_span("hello", {"n_error_start": True, "n_error_length": 1}, "h") is None
+    assert gt._provider_error_span("hello", {"n_error_start": 0, "n_error_length": True}, "h") is None
+    assert gt._provider_error_span("hello", {"n_error_start": "0", "n_error_length": 1}, "h") is None
+    assert gt._provider_error_span("hello", {"n_error_start": 0, "n_error_length": "1"}, "h") is None
+
+
+def test_provider_span_rejects_out_of_bounds() -> None:
+    assert gt._provider_error_span("hello", {"n_error_start": -1, "n_error_length": 1}, "h") is None
+    assert gt._provider_error_span("hello", {"n_error_start": 0, "n_error_length": 6}, "hello!") is None
+    assert gt._provider_error_span("hello", {"n_error_start": 4, "n_error_length": 2}, "oX") is None
+    assert gt._provider_error_span("hello", {"n_error_start": 0, "n_error_length": 0}, "") is None
+
+
+def test_provider_span_respects_slice_start() -> None:
+    """Native offsets are relative to the proofread window; results are absolute in full_text."""
+    full = "xx they is yy"
+    # Window is "they is" at [3, 10).
+    items = [
+        {
+            "wrong": "they is",
+            "correct": "they are",
+            "n_error_start": 0,
+            "n_error_length": 7,
+            "type": "grammar",
+            "reason": "agreement",
+            "short_comment": "agreement",
+            "full_comment": "agreement",
+            "rule_identifier": "harper||Agreement",
+            "suggestions": ["they are"],
+        }
+    ]
+    norms = gt.normalize_errors_for_text(full, 3, 10, items)
+    assert len(norms) == 1
+    assert norms[0].n_error_start == 3
+    assert norms[0].n_error_length == 7
+
+
+def test_provider_span_overlapping_second_dropped() -> None:
+    """used_spans drops a later provider diagnostic that overlaps an earlier one."""
+    text = "hello world"
+    items = [
+        {
+            "wrong": "hello",
+            "correct": "Hello",
+            "n_error_start": 0,
+            "n_error_length": 5,
+            "type": "Capitalization",
+            "reason": "capitalize",
+            "short_comment": "capitalize",
+            "full_comment": "capitalize",
+            "rule_identifier": "harper||Capitalization",
+            "suggestions": ["Hello"],
+        },
+        {
+            "wrong": "hello ",
+            "correct": "Hello ",
+            "n_error_start": 0,
+            "n_error_length": 6,
+            "type": "Capitalization",
+            "reason": "overlap",
+            "short_comment": "overlap",
+            "full_comment": "overlap",
+            "rule_identifier": "harper||Capitalization",
+            "suggestions": ["Hello "],
+        },
+    ]
+    norms = gt.normalize_errors_for_text(text, 0, len(text), items)
+    assert len(norms) == 1
+    assert norms[0].n_error_start == 0
+    assert norms[0].n_error_length == 5
+    assert norms[0].suggestions == ("Hello",)
+
+
+def test_provider_span_zero_length_rejected() -> None:
+    """Characterization: zero-width Harper inserts are still dropped (not enabled yet)."""
+    text = "Hello.world"
+    items = [
+        {
+            "wrong": "",
+            "correct": " ",
+            "n_error_start": 5,
+            "n_error_length": 0,
+            "type": "MissingSpace",
+            "reason": "Insert space",
+            "short_comment": "Insert space",
+            "full_comment": "Insert space",
+            "rule_identifier": "harper||MissingSpace",
+            "suggestions": [" "],
+        }
+    ]
+    assert gt._provider_error_span(text, items[0], "") is None
+    norms = gt.normalize_errors_for_text(text, 0, len(text), items)
+    assert norms == []
+
+
+def test_normalize_errors_respects_slice() -> None:
+    full = "xx they is yy"
+    items = [{"wrong": "they is", "correct": "they are", "type": "grammar", "reason": ""}]
+    norms = gt.normalize_errors_for_text(full, 3, 12, items)
+    assert len(norms) == 1
+    assert norms[0].n_error_start >= 3
+
+def test_normalize_errors_duplicate_wrong_two_occurrences_ordered() -> None:
+    full = "bob x bob"
+    items = [
+        {"wrong": "bob", "correct": "Bob", "type": "spelling", "reason": ""},
+        {"wrong": "bob", "correct": "Bob", "type": "spelling", "reason": ""},
+    ]
+    norms = gt.normalize_errors_for_text(full, 0, len(full), items)
+    assert len(norms) == 2
+    assert norms[0].n_error_start == 0
+    assert norms[1].n_error_start == 6
+
+def test_split_includes_inter_sentence_whitespace() -> None:
+    sents = gt.split_into_sentences(None, "en-US", "Hello.  There.")
+    assert len(sents) == 2
+    assert sents[0][1] == "Hello.  "
+    assert sents[1][1] == "There."
+
+
+def test_split_abbreviation_not_sentence_boundary() -> None:
+    # Whitelisted abbreviations and initials are not sentence boundaries
+    sents = gt.split_into_sentences(None, "en-US", "Dr. Johnson asked how I am.")
+    assert len(sents) == 1, f"Expected 1 sentence, got {len(sents)}: {sents}"
+    assert sents[0][1] == "Dr. Johnson asked how I am."
+
+    sents = gt.split_into_sentences(None, "en-US", "Mr. Smith went to the U.S.A. last year.")
+    assert len(sents) == 1, f"Expected 1 sentence, got {len(sents)}: {sents}"
+
+    sents = gt.split_into_sentences(None, "en-US", "This is approx. the value.")
+    assert len(sents) == 1, f"Expected 1 sentence for approx, got {len(sents)}: {sents}"
+
+    # Multilingual tests:
+    # German z.B.
+    sents = gt.split_into_sentences(None, "de-DE", "Das ist z.B. ein Test.")
+    assert len(sents) == 1, f"Expected 1 sentence for German z.B., got {len(sents)}: {sents}"
+
+    # Russian ул.
+    sents = gt.split_into_sentences(None, "ru-RU", "Мы живем на ул. Ленина.")
+    assert len(sents) == 1, f"Expected 1 sentence for Russian ул., got {len(sents)}: {sents}"
+
+    # Verify normal sentence splits don't get merged
+    sents = gt.split_into_sentences(None, "en-US", "This is a error. How long does it take?")
+    assert len(sents) == 2, f"Expected 2 sentences, got {len(sents)}: {sents}"
+
+
+def test_split_into_sentences_terminates_when_bi_stuck_on_abbrev() -> None:
+    # Regression: text like "...UNO. <content>" was observed in production to make
+    # bi.endOfSentence return a position <= the abbreviation period the inner loop was
+    # trying to skip past, spinning forever. The main thread froze inside doProofreading
+    # so LibreOffice could not close, and the debug log grew to hundreds of MB.
+    text = "Foo UNO. bar baz."
+    period_idx = text.index(".")  # 7
+
+    call_count = {"n": 0}
+
+    class StuckBI:
+        def endOfSentence(self, _t, pos, _locale):
+            call_count["n"] += 1
+            assert call_count["n"] < 50, f"split_into_sentences looped ({call_count['n']} endOfSentence calls)"
+            if pos <= period_idx:
+                return period_idx + 1
+            return period_idx
+
+    with patch("plugin.writer.locale.grammar_proofread_text.get_break_iterator_and_locale", return_value=(StuckBI(), "en-US")):
+        sents = gt.split_into_sentences(None, "en-US", text)
+
+    assert sents, "must return at least one sentence span"
+    last_start, last_text = sents[-1]
+    assert last_start + len(last_text) == len(text)
+
+
+def test_split_into_sentences_terminates_when_bi_returns_same_pos() -> None:
+    # Defends the outer-loop guard at grammar_proofread_text.py "if end_pos <= pos".
+    # Realistic LO limitation: BreakIterator for a script/locale whose ICU data is not
+    # installed (e.g. Thai on a US system, rare African scripts) can return the same
+    # position it was given, signalling "no sentence boundary found here".
+    text = "Some text without any terminator BI understands"
+
+    class StuckBI:
+        calls = 0
+
+        def endOfSentence(self, _t, pos, _locale):
+            type(self).calls += 1
+            assert type(self).calls < 50, f"split_into_sentences looped ({type(self).calls} endOfSentence calls)"
+            return pos
+
+    with patch("plugin.writer.locale.grammar_proofread_text.get_break_iterator_and_locale", return_value=(StuckBI(), "en-US")):
+        sents = gt.split_into_sentences(None, "en-US", text)
+
+    assert sents, "must return at least one sentence span"
+    last_start, last_text = sents[-1]
+    assert last_start + len(last_text) == len(text)
+
+
+def test_tokenize_terminates_when_bi_word_boundary_does_not_advance() -> None:
+    # Defends the _tokenize guard "if res.endPos <= start: ... break".
+    # Without this guard, an under-equipped BreakIterator that returns endPos == start
+    # would spin _tokenize forever during normalize_errors_for_text overlap expansion.
+    text = "alpha beta gamma"
+
+    class StuckWordBI:
+        calls = 0
+
+        def getWordBoundary(self, _t, pos, _locale, _wt, _dir):
+            type(self).calls += 1
+            assert type(self).calls < 50, f"_tokenize looped ({type(self).calls} getWordBoundary calls)"
+            res = MagicMock()
+            res.startPos = pos
+            res.endPos = pos
+            return res
+
+        def endOfSentence(self, t, _pos, _locale):
+            return len(t)
+
+    toks = gt._tokenize(text, StuckWordBI(), "en-US")
+    assert toks == [text], "stuck BI should produce a single fallback token covering the rest"
+
+
+def test_split_into_sentences_handles_bi_past_end() -> None:
+    # Some BreakIterator implementations may return a position past len(text)
+    # (one-past-end with extra slack). Python slice clamping makes this safe;
+    # this test pins that contract so a future refactor that adds explicit
+    # indexing (e.g. text[end_pos] instead of slicing) would surface here.
+    text = "Short text."
+
+    class PastEndBI:
+        def endOfSentence(self, t, _pos, _locale):
+            return len(t) + 5
+
+    with patch("plugin.writer.locale.grammar_proofread_text.get_break_iterator_and_locale", return_value=(PastEndBI(), "en-US")):
+        sents = gt.split_into_sentences(None, "en-US", text)
+
+    assert len(sents) == 1
+    assert sents[0][0] == 0
+    assert sents[0][1] == text
+
+
+def test_split_into_sentences_thai_text_on_non_thai_locale() -> None:
+    # Realistic LO limitation: user types Thai script in a document whose CharLocale
+    # is en-US (or any non-Thai locale). BI uses en-US rules, finds no Latin sentence
+    # terminator in the Thai text, and returns len(text) immediately. The whole buffer
+    # should become one sentence and the call must terminate cleanly (no abbreviation
+    # heuristic confusion from Thai characters).
+    text = "\u0e2a\u0e27\u0e31\u0e2a\u0e14\u0e35 \u0e04\u0e23\u0e31\u0e1a"  # "sawatdi khrap"
+
+    class WholeBufferBI:
+        def endOfSentence(self, t, _pos, _locale):
+            return len(t)
+
+    with patch("plugin.writer.locale.grammar_proofread_text.get_break_iterator_and_locale", return_value=(WholeBufferBI(), "en-US")):
+        sents = gt.split_into_sentences(None, "en-US", text)
+
+    assert len(sents) == 1
+    assert sents[0][0] == 0
+    assert sents[0][1] == text
+
+
+def test_overlap_forward_expansion() -> None:
+    full = "I went to the store."
+    items = [{"wrong": "to", "correct": "to the", "type": "grammar"}]
+    norms = gt.normalize_errors_for_text(full, 0, len(full), items)
+    assert len(norms) == 0, "Should be dropped as a no-op"
+    items2 = [{"wrong": "to", "correct": "into the", "type": "grammar"}]
+    norms2 = gt.normalize_errors_for_text(full, 0, len(full), items2)
+    assert len(norms2) == 1
+    err = norms2[0]
+    assert full[err.n_error_start : err.n_error_start + err.n_error_length] == "to the"
+
+def test_overlap_backward_expansion() -> None:
+    full = "He is a good man."
+    items = [{"wrong": "good", "correct": "a good", "type": "grammar"}]
+    norms = gt.normalize_errors_for_text(full, 0, len(full), items)
+    assert len(norms) == 0, "Should be dropped as a no-op"
+    items2 = [{"wrong": "good", "correct": "a very good", "type": "grammar"}]
+    norms2 = gt.normalize_errors_for_text(full, 0, len(full), items2)
+    assert len(norms2) == 1
+    assert full[norms2[0].n_error_start : norms2[0].n_error_start + norms2[0].n_error_length] == "a good"
+
+def test_extend_through_trailing_whitespace() -> None:
+    assert gt.extend_through_trailing_whitespace("Hi.  There", 3) == 5
+    assert gt.extend_through_trailing_whitespace("word", 4) == 4
+
+def test_anchor_wrong_in_window() -> None:
+    assert gt.anchor_wrong_in_window("hello bob there", "bob", 0) == 6
+    assert gt.anchor_wrong_in_window("bob x bob", "bob", 0) == 0
+    assert gt.anchor_wrong_in_window("bob x bob", "bob", 1) == 6
+    assert gt.anchor_wrong_in_window("", "x", 0) is None
+
+
+def test_calculate_covered_span_end() -> None:
+    assert gt.calculate_covered_span_end([]) == 0
+    spans = [(0, 10, "Sentence 1."), (12, 25, "Sentence 2.")]
+    assert gt.calculate_covered_span_end(spans) == 25
+
+
+def test_reconcile_active_and_paragraph_spans() -> None:
+    active_spans = [
+        (0, 10, "Sentence 1."),
+        (12, 25, "Sentence 2."),
+    ]
+    # If Sentence 1 is cached, paragraph uncached only contains Sentence 2
+    uncached_paragraph_spans = [(12, 25, "Sentence 2.")]
+    reconciled = gt.reconcile_active_and_paragraph_spans(active_spans, uncached_paragraph_spans)
+    assert reconciled == [(12, 25, "Sentence 2.")]
+
+    # If all sentences in paragraph are cached
+    assert gt.reconcile_active_and_paragraph_spans(active_spans, []) == []
+
+    # If all sentences in paragraph are uncached
+    assert gt.reconcile_active_and_paragraph_spans(active_spans, active_spans) == active_spans
+
+
+def test_span_overlaps_range() -> None:
+    assert gt.span_overlaps_range(10, 20, 5, 15) is True
+    assert gt.span_overlaps_range(10, 20, 15, 25) is True
+    assert gt.span_overlaps_range(10, 20, 12, 18) is True
+    assert gt.span_overlaps_range(10, 20, 5, 25) is True
+    assert gt.span_overlaps_range(10, 20, 0, 10) is False
+    assert gt.span_overlaps_range(10, 20, 20, 30) is False
+    assert gt.span_overlaps_range(10, 20, 0, 5) is False
+    assert gt.span_overlaps_range(10, 20, 25, 30) is False
+    assert gt.span_overlaps_range(10, 10, 5, 15) is False # Empty span yields false
+
+
+def test_candidate_sentence_spans_for_proofreading() -> None:
+    text = "Sentence one. Sentence two. Sentence three."
+    ctx = None
+    loc = "en-US"
+    
+    # Paragraph pass (n_start_lo == 0) returns all
+    spans = gt.candidate_sentence_spans_for_proofreading(ctx, loc, text, 0, 10)
+    assert len(spans) == 3
+    assert spans[0][2] == "Sentence one. "
+    
+    # Incremental mode: overlap with "Sentence two." (bounds ~ 14 to 27)
+    # Let's request bounds inside sentence two: [15, 20)
+    spans2 = gt.candidate_sentence_spans_for_proofreading(ctx, loc, text, 15, 20)
+    assert len(spans2) == 1
+    assert spans2[0][2] == "Sentence two. "
+    
+    # Span overlap with first and second sentence [10, 15)
+    spans3 = gt.candidate_sentence_spans_for_proofreading(ctx, loc, text, 10, 15)
+    assert len(spans3) == 2
+    assert spans3[0][2] == "Sentence one. "
+    assert spans3[1][2] == "Sentence two. "
+    
+    # Clamping and out of bounds
+    spans4 = gt.candidate_sentence_spans_for_proofreading(ctx, loc, text, -5, 5)
+    assert len(spans4) == 1
+    assert spans4[0][2] == "Sentence one. "
+    
+    spans5 = gt.candidate_sentence_spans_for_proofreading(ctx, loc, text, 100, 110)
+    assert len(spans5) == 0
+
+    # Empty text
+    assert gt.candidate_sentence_spans_for_proofreading(ctx, loc, "", 0, 10) == []
+
+
+def test_filter_sentence_spans_for_thresholds() -> None:
+    spans = [
+        (0, 5, "Hi."), # Complete + Short -> Kept
+        (5, 30, "This is a much longer sentence."), # Complete + Long -> Kept
+        (30, 40, "The quick"), # Incomplete + Short -> Dropped
+        (40, 70, "This is an incomplete but very long fragment"), # Incomplete + Long -> Kept
+    ]
+    
+    filtered = gt.filter_sentence_spans_for_thresholds(spans)
+    assert len(filtered) == 3
+    assert filtered[0][2] == "Hi."
+    assert filtered[1][2] == "This is a much longer sentence."
+    assert filtered[2][2] == "This is an incomplete but very long fragment"
+
+
+def test_active_spans_from_paragraph_n_start_zero_keeps_all() -> None:
+    """Paragraph-scale pass ignores suggested end (do not naive-overlap)."""
+    text = "Sentence one. Sentence two. Sentence three."
+    ctx = None
+    loc = "en-US"
+    paragraph = gt.filter_sentence_spans_for_thresholds(
+        gt.candidate_sentence_spans_for_proofreading(ctx, loc, text, 0, len(text))
+    )
+    assert len(paragraph) == 3
+    active = gt.active_spans_from_paragraph(paragraph, text, 0, 10)
+    assert active == list(paragraph)
+
+
+def test_filter_sentence_spans_for_overlap_matches_incremental_candidate() -> None:
+    text = "Sentence one. Sentence two. Sentence three."
+    ctx = None
+    loc = "en-US"
+    paragraph = gt.candidate_sentence_spans_for_proofreading(ctx, loc, text, 0, len(text))
+    nlen = len(text)
+    for n_start, n_end in ((15, 20), (10, 15), (-5, 5), (100, 110)):
+        expected = gt.candidate_sentence_spans_for_proofreading(ctx, loc, text, n_start, n_end)
+        got = gt.filter_sentence_spans_for_overlap(paragraph, n_start, n_end, nlen)
+        assert got == expected
+
+
+def test_active_spans_overlap_after_threshold_drops_short_fragments() -> None:
+    spans = [
+        (0, 14, "Sentence one. "),
+        (14, 24, "The quick"),  # incomplete + short → dropped by threshold
+        (24, 40, "Sentence three."),
+    ]
+    filtered = gt.filter_sentence_spans_for_thresholds(spans)
+    assert [t for _s, _e, t in filtered] == ["Sentence one. ", "Sentence three."]
+    text = "x" * 40
+    active = gt.active_spans_from_paragraph(filtered, text, 14, 30)
+    assert [t for _s, _e, t in active] == ["Sentence three."]
+
+
+def test_merge_dialogue_basic() -> None:
+    sents = [(0, '"Fire! '), (7, 'Fire!" he yelled.')]
+    merged = gt.merge_dialogue_sentences(sents)
+    assert merged == [(0, '"Fire! Fire!" he yelled.')]
+
+
+def test_merge_dialogue_curly_quotes() -> None:
+    sents = [(0, '\u201cFire! '), (7, 'Fire!\u201d he yelled.')]
+    merged = gt.merge_dialogue_sentences(sents)
+    assert merged == [(0, '\u201cFire! Fire!\u201d he yelled.')]
+
+
+def test_merge_dialogue_balanced_no_merge() -> None:
+    sents = [(0, '"Hello!" she said. '), (20, '"Bye!" he said.')]
+    merged = gt.merge_dialogue_sentences(sents)
+    assert len(merged) == 2
+    assert merged[0] == (0, '"Hello!" she said. ')
+    assert merged[1] == (20, '"Bye!" he said.')
+
+
+def test_merge_dialogue_german_low9() -> None:
+    sents = [(0, '\u201eFire! '), (7, 'Fire!\u201c sagte er.')]
+    merged = gt.merge_dialogue_sentences(sents)
+    assert merged == [(0, '\u201eFire! Fire!\u201c sagte er.')]
+
+
+def test_merge_dialogue_guillemets() -> None:
+    sents = [(0, '\u00abBonjour!\u00bb dit-il. '), (20, '\u00abAu revoir!\u00bb')]
+    merged = gt.merge_dialogue_sentences(sents)
+    assert len(merged) == 2
+    assert merged[0] == (0, '\u00abBonjour!\u00bb dit-il. ')
+    assert merged[1] == (20, '\u00abAu revoir!\u00bb')
+
+
+def test_merge_dialogue_unclosed_at_end() -> None:
+    sents = [(0, '"Fire!')]
+    merged = gt.merge_dialogue_sentences(sents)
+    assert merged == [(0, '"Fire!')]
+
+
+def test_merge_dialogue_max_chars_cap() -> None:
+    # Two chunks whose combined length exceeds max_merge_chars (100)
+    sents = [(0, '"' + 'a' * 60 + '! '), (64, 'b' * 60 + '!"')]
+    merged = gt.merge_dialogue_sentences(sents, max_merge_chars=100)
+    assert len(merged) == 2
+    assert merged[0] == (0, '"' + 'a' * 60 + '! ')
+    assert merged[1] == (64, 'b' * 60 + '!"')
+
+
+def test_merge_dialogue_max_consecutive_cap() -> None:
+    # 4 chunks with odd quotes, max_consecutive_merges=2
+    sents = [
+        (0, '"One! '),
+        (6, 'Two! '),
+        (11, 'Three! '),
+        (18, 'Four!"'),
+    ]
+    merged = gt.merge_dialogue_sentences(sents, max_consecutive_merges=2)
+    # Merges 0 + 1 (1 merge) + 2 (2 merges) -> then hits cap and emits, then 3 is separate
+    assert len(merged) == 2
+    assert merged[0] == (0, '"One! Two! Three! ')
+    assert merged[1] == (18, 'Four!"')
+
+
+def test_merge_dialogue_ignores_apostrophes() -> None:
+    sents = [(0, "It's fine! "), (11, "Don't worry.")]
+    merged = gt.merge_dialogue_sentences(sents)
+    assert len(merged) == 2
+    assert merged[0] == (0, "It's fine! ")
+    assert merged[1] == (11, "Don't worry.")
+
+
+def test_merge_dialogue_nested() -> None:
+    sents = [(0, "\"He said 'wow!' to them.\" she noted. "), (38, "Next.")]
+    merged = gt.merge_dialogue_sentences(sents)
+    assert len(merged) == 2
+    assert merged[0] == (0, "\"He said 'wow!' to them.\" she noted. ")
+    assert merged[1] == (38, "Next.")
+
+
+def test_candidate_sentence_spans_merges_dialogue() -> None:
+    text = '"Fire! Fire!" he yelled. Next sentence.'
+    spans = gt.candidate_sentence_spans_for_proofreading(None, "en-US", text, 0, len(text))
+    # Without dialogue merging, FakeBI splits at 'Fire! ' and 'Fire!" he yelled. '
+    # With dialogue merging, the dialogue is kept as a single sentence.
+    assert len(spans) == 2
+    assert spans[0][2] == '"Fire! Fire!" he yelled. '
+    assert spans[1][2] == "Next sentence."
+

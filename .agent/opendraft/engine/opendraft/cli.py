@@ -829,9 +829,17 @@ def main():
     )
 
     parser.add_argument(
+        "--format", "-f",
+        type=str,
+        default="odt",
+        choices=["odt", "docx", "pdf", "html", "latex"],
+        help="Export document format (odt, docx, pdf, html, latex)"
+    )
+
+    parser.add_argument(
         "--text",
         type=str,
-        help="Direct text input for humanize command"
+        help="Direct text input or file path for humanize/audit/export commands"
     )
 
     args = parser.parse_args()
@@ -863,7 +871,8 @@ def main():
         
         target_text = args.text or (args.blurb if args.blurb else "")
         if not target_text:
-            print(f"\n  {c.RED}✗{c.RESET} Please specify text with --text \"...\" or provide a file.\n")
+            print(f"\n  {c.RED}[X]{c.RESET} Please specify text with --text \"...\" or provide a file.\n")
+            return 1
         print(f"\n  {c.PURPLE}[*]{c.RESET} {c.BOLD}Applying 33-pattern AI cleanup & voice calibration...{c.RESET}")
         try:
             out = humanize_text(target_text, writing_sample=sample_text)
@@ -897,6 +906,23 @@ def main():
             print(format_cli_report(res))
             print()
             return 0 if res.is_clean else 1
+        except Exception as e:
+            print_friendly_error(e)
+            return 1
+
+    # Handle 'export' command (LibreOffice / WriterAgent bridge)
+    if args.topic and args.topic.lower() == 'export':
+        from opendraft.export_libreoffice import convert_markdown_to_document
+        target_file = Path(args.text) if args.text else (Path(args.blurb) if args.blurb else None)
+        if not target_file or not target_file.exists():
+            print(f"\n  {c.RED}[X]{c.RESET} Please specify an existing Markdown file to export using --text path/to/draft.md\n")
+            return 1
+
+        print(f"\n  {c.PURPLE}[*]{c.RESET} {c.BOLD}Exporting {target_file.name} to {args.format.upper()} via LibreOffice bridge...{c.RESET}")
+        try:
+            out_doc = convert_markdown_to_document(target_file, output_format=args.format, output_path=args.output)
+            print(f"  {c.GREEN}[OK]{c.RESET} Successfully exported to: {out_doc}\n")
+            return 0
         except Exception as e:
             print_friendly_error(e)
             return 1

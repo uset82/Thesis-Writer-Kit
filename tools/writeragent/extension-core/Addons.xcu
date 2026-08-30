@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<oor:component-data xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" oor:name="Addons" oor:package="org.openoffice.Office">
+  <node oor:name="AddonUI">
+    <node oor:name="OfficeMenuBar">
+      <node oor:name="org.extension.librepy.menubar" oor:op="replace">
+        <prop oor:name="Title" oor:type="xs:string">
+          <value xml:lang="en-US">LibrePy</value>
+        </prop>
+        <prop oor:name="Context" oor:type="xs:string">
+          <value>com.sun.star.sheet.SpreadsheetDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.TextDocument,com.sun.star.text.WebDocument,com.sun.star.drawing.DrawingDocument,com.sun.star.presentation.PresentationDocument</value>
+        </prop>
+        <!-- Node names M01… control on-screen order (LibreOffice sorts by oor:name). -->
+        <node oor:name="Submenu">
+          <node oor:name="M01" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">Run Python Script...</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>org.extension.librepy:scripting.run_python_dialog</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.TextDocument,com.sun.star.text.WebDocument,com.sun.star.drawing.DrawingDocument,com.sun.star.presentation.PresentationDocument</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
+          <node oor:name="M02" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">Edit Python in Cell...</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>org.extension.librepy:scripting.edit_python_cell</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
+          <node oor:name="M03" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">Insert LaTeX Math...</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>org.extension.librepy:writer.insert_latex_dialog</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.text.TextDocument</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
+          <node oor:name="M04" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">Text Analytics...</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>org.extension.librepy:textanalytics.open_dialog</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.text.TextDocument</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
+          <node oor:name="M05" oor:op="replace">
+            <prop oor:name="URL">
+              <value>private:separator</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.TextDocument,com.sun.star.text.WebDocument,com.sun.star.drawing.DrawingDocument,com.sun.star.presentation.PresentationDocument</value>
+            </prop>
+          </node>
+          <node oor:name="M06" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">Settings</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>org.extension.librepy:main.settings</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.TextDocument,com.sun.star.text.WebDocument,com.sun.star.drawing.DrawingDocument,com.sun.star.presentation.PresentationDocument</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
+          <node oor:name="M07" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">Vision OCR Settings...</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>org.extension.librepy:vision.open_settings</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.TextDocument,com.sun.star.text.WebDocument,com.sun.star.drawing.DrawingDocument,com.sun.star.presentation.PresentationDocument</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
+          <node oor:name="M08" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">Reset Python Session</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>org.extension.librepy:scripting.reset_python_session</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.TextDocument,com.sun.star.text.WebDocument,com.sun.star.drawing.DrawingDocument,com.sun.star.presentation.PresentationDocument</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
+          <node oor:name="M09" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">Report bug...</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>org.extension.librepy:main.report_bug</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.TextDocument,com.sun.star.text.WebDocument,com.sun.star.drawing.DrawingDocument,com.sun.star.presentation.PresentationDocument</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
+        </node>
+      </node>
+    </node>
+    <node oor:name="Images">
+      <node oor:name="org.extension.librepy.scripting.run_python_dialog.img" oor:op="replace">
+        <prop oor:name="URL">
+          <value>org.extension.librepy:scripting.run_python_dialog</value>
+        </prop>
+        <node oor:name="UserDefinedImages">
+          <prop oor:name="ImageSmallURL">
+            <value>%origin%/assets/python_32.png</value>
+          </prop>
+          <prop oor:name="ImageBigURL">
+            <value>%origin%/assets/python_32.png</value>
+          </prop>
+        </node>
+      </node>
+      <node oor:name="org.extension.librepy.scripting.edit_python_cell.img" oor:op="replace">
+        <prop oor:name="URL">
+          <value>org.extension.librepy:scripting.edit_python_cell</value>
+        </prop>
+        <node oor:name="UserDefinedImages">
+          <prop oor:name="ImageSmallURL">
+            <value>%origin%/assets/python_cell_32.png</value>
+          </prop>
+          <prop oor:name="ImageBigURL">
+            <value>%origin%/assets/python_cell_32.png</value>
+          </prop>
+        </node>
+      </node>
+      <node oor:name="org.extension.librepy.main.settings.img" oor:op="replace">
+        <prop oor:name="URL">
+          <value>org.extension.librepy:main.settings</value>
+        </prop>
+        <node oor:name="UserDefinedImages">
+          <prop oor:name="ImageSmallURL">
+            <value>%origin%/assets/gear_32.png</value>
+          </prop>
+          <prop oor:name="ImageBigURL">
+            <value>%origin%/assets/gear_32.png</value>
+          </prop>
+        </node>
+      </node>
+    </node>
+  </node>
+</oor:component-data>

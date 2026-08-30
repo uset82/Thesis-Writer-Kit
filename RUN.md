@@ -54,9 +54,11 @@ cd .agent/opendraft/engine
   ```powershell
   python -m opendraft.cli humanize --text "Additionally, this transformative landscape stands as a testament..."
   ```
-* **Humanize with Voice Calibration**:
+* **Export to ODT / Word / PDF** (LibreOffice & Math Bridge):
   ```powershell
-  python -m opendraft.cli humanize --text "Draft content..." --sample "path/to/my_writing_sample.txt"
+  python -m opendraft.cli export --text path/to/draft.md --format odt
+  python -m opendraft.cli export --text path/to/draft.md --format docx
+  python -m opendraft.cli export --text path/to/draft.md --format pdf
   ```
 
 ---

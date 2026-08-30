@@ -1,0 +1,133 @@
+# WriterAgent - AI Writing Assistant for LibreOffice
+# Copyright (c) 2026 KeithCu (modifications and relicensing)
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Tests for plugin.chatbot.module_config_dialog."""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+from plugin.chatbot.module_config_dialog import (
+    ModuleConfigDialog,
+    _option_labels,
+    _set_field_options,
+    apply_module_config_result,
+    get_module_config_dialog_id,
+    get_module_config_field_specs,
+)
+
+
+def test_get_module_config_dialog_id_for_vision():
+    with patch(
+        "plugin.chatbot.settings_fields.find_module_manifest",
+        return_value={
+            "name": "vision",
+            "config_dialog": {"id": "VisionSettingsDialog", "library": "Dialogs"},
+        },
+    ):
+        assert get_module_config_dialog_id("vision") == "VisionSettingsDialog"
+
+
+def test_manifest_vision_module_has_config_dialog():
+    from plugin._manifest import MODULES
+
+    vision = next(m for m in MODULES if m.get("name") == "vision")
+    assert vision.get("settings_tab") is False
+    assert vision.get("config_dialog", {}).get("id") == "VisionSettingsDialog"
+
+
+def test_get_module_config_field_specs_skips_internal_and_non_persisted():
+    ctx = object()
+    manifest = {
+        "name": "vision",
+        "config": {
+            "device": {"type": "string", "default": "auto", "widget": "select", "page": "general"},
+            "open_settings": {"type": "string", "widget": "button", "settings_persist": False},
+            "_internal": {"type": "string", "internal": True},
+        },
+    }
+    with patch("plugin.chatbot.settings_fields.find_module_manifest", return_value=manifest), \
+         patch("plugin.chatbot.settings_fields.get_config", return_value="auto"):
+        specs = get_module_config_field_specs(ctx, "vision")
+
+    assert len(specs) == 1
+    assert specs[0]["name"] == "device"
+    assert specs[0]["config_key"] == "vision.device"
+
+
+def test_manifest_vision_insert_mode_has_options():
+    from plugin._manifest import MODULES
+
+    vision = next(m for m in MODULES if m.get("name") == "vision")
+    schema = vision.get("config", {}).get("insert_mode", {})
+    assert schema.get("widget") == "select"
+    assert len(schema.get("options") or []) >= 2
+
+
+def test_option_labels_translates_select_labels():
+    field = {
+        "name": "insert_mode",
+        "options": [
+            {"value": "html", "label": "Standard HTML"},
+            {"value": "structured", "label": "Structured (layout / cell grid)"},
+        ],
+    }
+    labels = _option_labels(field)
+    assert len(labels) == 2
+    assert "Standard HTML" in labels[0] or labels[0]
+
+
+def test_set_field_options_uses_string_item_list():
+    model = type("M", (), {"StringItemList": ()})()
+    ctrl = type("C", (), {})()
+    ctrl.getModel = lambda: model  # type: ignore[method-assign]
+
+    field = {
+        "name": "insert_mode",
+        "options": [{"value": "html", "label": "Standard HTML"}],
+    }
+    _set_field_options(ctrl, field)
+    assert model.StringItemList == ("Standard HTML",)
+
+
+def test_apply_module_config_result_delegates_raw_values_to_config():
+    ctx = object()
+    manifest = {
+        "name": "demo",
+        "config": {
+            "count": {"type": "int", "default": 1, "widget": "number"},
+            "mode": {
+                "type": "string",
+                "default": "fast",
+                "widget": "select",
+                "options": [{"value": "fast", "label": "Fast Mode"}],
+            },
+        },
+    }
+    with patch("plugin.chatbot.settings_fields.find_module_manifest", return_value=manifest), \
+         patch("plugin.chatbot.settings_fields.get_config", side_effect=lambda key: {"demo.count": 1, "demo.mode": "fast"}[key]), \
+         patch("plugin.chatbot.settings_fields.set_config") as mock_set_config:
+        apply_module_config_result(ctx, "demo", {"count": "42", "mode": "Fast Mode"})
+
+    mock_set_config.assert_any_call("demo.count", "42")
+    mock_set_config.assert_any_call("demo.mode", "Fast Mode")
+
+
+def test_open_passes_ctx_to_get_extension_url():
+    ctx = MagicMock()
+    smgr = MagicMock()
+    ctx.getServiceManager.return_value = smgr
+    smgr.createInstanceWithContext.side_effect = RuntimeError("stop after url")
+    with (
+        patch(
+            "plugin.chatbot.module_config_dialog.get_module_config_dialog_id",
+            return_value="VisionSettingsDialog",
+        ),
+        patch(
+            "plugin.chatbot.module_config_dialog.get_extension_url",
+            return_value="file:///tmp/LibrePy.oxt",
+        ) as geu,
+    ):
+        ModuleConfigDialog(ctx, "vision")._open()
+    geu.assert_called_once_with(ctx)

@@ -1,0 +1,376 @@
+#!/usr/bin/env python3
+# WriterAgent - AI Writing Assistant for LibreOffice
+# Copyright (c) 2026 KeithCu (modifications and relicensing)
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+"""Generate writeragent_api.py — Python proxy module for venv subprocess tool calls.
+
+Usage: python scripts/generate_tool_proxies.py > plugin/scripting/writeragent_api.py
+"""
+
+import keyword
+import os
+import sys
+import pprint
+from collections import defaultdict
+from importlib.abc import Loader, MetaPathFinder
+
+# Ensure the project root is in sys.path
+scripts_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.dirname(scripts_dir)
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+
+# Mock UNO before importing plugin modules
+import types
+from unittest.mock import MagicMock
+
+# Dictionary to cache mock classes to avoid duplicates but also metaclass/MRO issues
+_MOCK_CLASSES = {}
+
+def get_mock_class(name):
+    if name not in _MOCK_CLASSES:
+        # Create a unique class for each name
+        class MockBase:
+            def __init__(self, *args, **kwargs): pass
+            def __getattr__(self, name): return MagicMock()
+            def __call__(self, *args, **kwargs): return self
+            @classmethod
+            def addImplementation(cls, *args, **kwargs): pass
+        MockBase.__name__ = name
+        _MOCK_CLASSES[name] = MockBase
+    return _MOCK_CLASSES[name]
+
+# Universal fallback for sys.modules
+class MockModule(types.ModuleType):
+    def __init__(self, name):
+        super().__init__(name)
+        self.__path__ = []
+        self.__file__ = None
+
+    def __getattr__(self, name):
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        return get_mock_class(name)
+
+sys.modules["uno"] = MagicMock()
+sys.modules["unohelper"] = MockModule("unohelper")
+
+# Custom finder for com.sun.star hierarchy
+class MockFinder(MetaPathFinder, Loader):
+    def find_spec(self, fullname, path, target=None):
+        if fullname.startswith("com.") or fullname == "com":
+            return self._gen_spec(fullname)
+        return None
+    def _gen_spec(self, fullname):
+        from importlib.machinery import ModuleSpec
+        return ModuleSpec(fullname, self)
+    def create_module(self, spec):
+        return MockModule(spec.name)
+    def exec_module(self, module):
+        pass
+
+sys.meta_path.insert(0, MockFinder())
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from plugin.framework.tool import ToolBase
+
+JSON_TO_PYTHON = {
+    "string": "str",
+    "integer": "int",
+    "boolean": "bool",
+    "number": "float",
+    "object": "dict",
+    "array": "list",
+}
+
+DEFAULTS_BY_TYPE = {
+    "string": '""',
+    "integer": "0",
+    "boolean": "True",
+    "number": "0.0",
+    "object": "{}",
+    "array": "[]",
+}
+
+
+def _get_schema_type(schema: dict) -> str:
+    t = schema.get("type", "")
+    if isinstance(t, list):
+        types_list = [x for x in t if x != "null"]
+        t = types_list[0] if types_list else ""
+    return str(t)
+
+
+def _param_default(schema: dict) -> str:
+    """Derive a Python default value from a JSON Schema property."""
+    if "default" in schema:
+        return repr(schema["default"])
+    return DEFAULTS_BY_TYPE.get(_get_schema_type(schema), "None")
+
+
+def _python_param_name(schema_key: str) -> str:
+    """Python identifier for a schema key. Only ``range`` is remapped (builtin clash)."""
+    if schema_key == "range":
+        return "range_name"
+    if keyword.iskeyword(schema_key):
+        return schema_key + "_"
+    return schema_key
+
+
+def _first_sentence(description: str) -> str:
+    first = (description or "").split(". ")[0].rstrip(".")
+    return f"{first}." if first else ""
+
+
+def _iter_params(tool: "ToolBase") -> list[tuple[str, str, dict]]:
+    """Yield (python_name, schema_key, property_schema) in schema order."""
+    props = (tool.parameters or {}).get("properties", {})
+    return [(_python_param_name(key), key, schema) for key, schema in props.items()]
+
+
+def schema_to_signature(tool: "ToolBase") -> tuple[list[str], list[str]]:
+    """Convert a tool's JSON Schema parameters to Python positional and keyword args."""
+    required = set((tool.parameters or {}).get("required", []))
+
+    positional, keyword = [], []
+    for py_name, schema_key, schema in _iter_params(tool):
+        type_str = _get_schema_type(schema)
+        py_type = JSON_TO_PYTHON.get(type_str, "Any")
+        if schema_key in required:
+            positional.append(f"{py_name}: {py_type}")
+        else:
+            if "default" in schema:
+                default = _param_default(schema)
+                keyword.append(f"{py_name}: {py_type} = {default}")
+            else:
+                # Omit from the wire (see _rpc_call dropping None) so the tool's
+                # own default applies. A boolean default of True was making
+                # apply_document_content(..., dry_run=True) a silent no-op.
+                keyword.append(f"{py_name}: {py_type} | None = None")
+    return positional, keyword
+
+
+def group_tools(tools: list["ToolBase"]) -> dict[str, list[tuple[str, "ToolBase"]]]:
+    """Group tools by namespace prefix, stripping the prefix from method names."""
+    groups: dict[str, list[tuple[str, "ToolBase"]]] = defaultdict(list)
+    for tool in tools:
+        name = tool.name or ""
+        # 1. Check specialized_domain
+        domain = getattr(tool, "specialized_domain", None)
+        if domain:
+            namespace = domain
+            # Strip prefix if it matches domain (e.g. footnotes_insert -> insert)
+            prefix = domain
+            if domain.endswith("s"):
+                # Handle plurals (footnotes -> footnote)
+                singular = domain[:-1]
+                if name.startswith(singular + "_"):
+                    prefix = singular
+                elif name.startswith(domain + "_"):
+                    prefix = domain
+            
+            if name.startswith(prefix + "_"):
+                rest = name[len(prefix) + 1 :]
+            else:
+                rest = name
+        else:
+            # Break up "core" tools by document type
+            doc_types = getattr(tool, "doc_types", []) or []
+            uno_services = getattr(tool, "uno_services", []) or []
+            
+            # Infer doc_types from uno_services if missing
+            if not doc_types and uno_services:
+                inferred = set()
+                for svc in uno_services:
+                    if "text.TextDocument" in svc: inferred.add("writer")
+                    elif "sheet.SpreadsheetDocument" in svc: inferred.add("calc")
+                    elif "drawing.DrawingDocument" in svc: inferred.add("draw")
+                    elif "presentation.PresentationDocument" in svc: inferred.add("draw")
+                doc_types = list(inferred)
+
+            if len(doc_types) == 1:
+                namespace = doc_types[0]
+            elif set(doc_types) == {"draw", "impress"}:
+                namespace = "draw"
+            elif not doc_types:
+                # Truly universal tools stay in core (e.g. web_research, upsert_memory)
+                namespace = "core"
+            else:
+                # Mixed support (Writer + Calc etc)
+                namespace = "core"
+            rest = name
+
+        # Singularize namespace for nicer usage: footnote.insert instead of footnotes.insert
+        if namespace == "indexes":
+            namespace = "index"
+        elif namespace.endswith("s") and namespace not in ("images", "styles", "forms"):
+            # Very basic singularization
+            namespace = namespace[:-1]
+
+        groups[namespace].append((rest, tool))
+    return dict(groups)
+
+
+def generate_module(tools: list["ToolBase"]) -> str:
+    """Generate the complete writeragent_api.py module."""
+    groups = group_tools(tools)
+
+    lines = [
+        '"""Auto-generated WriterAgent tool proxy API.',
+        '',
+        'Generated by scripts/generate_tool_proxies.py — DO NOT EDIT.',
+        'Provides Python-native access to WriterAgent tools from venv subprocess scripts.',
+        '',
+        'Skip replacing this with a __getattr__ proxy over DOMAIN_TOOLS: explicit',
+        'per-tool classes are the public script API (IDE jump and types). Change this',
+        'generator if the file is too large; do not slim the generated module by hand.',
+        '"""',
+        'import os',
+        'import sys',
+        'import threading',
+        'import uuid',
+        'from plugin.framework.constants import WORKFLOW_TASK_PREFIXES as _WORKFLOW_TASK_PREFIXES',
+        'from plugin.scripting.ipc import DEFAULT_MAX_PAYLOAD_BYTES, read_pickle_frame, write_pickle_frame',
+        '',
+        '# Re-export so venv scripts and tests share the comment-scan prefix tuple.',
+        'WORKFLOW_TASK_PREFIXES = _WORKFLOW_TASK_PREFIXES',
+        '',
+        '',
+        '# Detect if running in-process (LibreOffice host) or out-of-process (Venv worker)',
+        'IS_WORKER = os.environ.get("WRITERAGENT_IS_WORKER") == "1"',
+        '',
+        '# ── RPC transport ──────────────────────────────────────────────',
+        '_lock = threading.Lock()',
+        '',
+        '',
+        'def _rpc_call(tool_name: str, **kwargs) -> dict:',
+        '    """Send a tool call to the LibreOffice host and block for the result."""',
+        '    kwargs = {k: v for k, v in kwargs.items() if v is not None}',
+        '    if not IS_WORKER:',
+        '        try:',
+        '            from plugin.scripting.host_rpc import execute_tool',
+        '',
+        '            return execute_tool(tool_name, kwargs, caller="script")',
+        '        except Exception as e:',
+        '            raise RuntimeError(f"Failed to execute tool in-process: {e}")',
+        '',
+        '    call_id = str(uuid.uuid4())',
+        '    request = {"type": "tool_call", "id": call_id, "tool": tool_name, "args": kwargs}',
+        '    with _lock:',
+        '        write_pickle_frame(sys.stdout.buffer, request)',
+        '        # Block and read the response frame from the host on stdin',
+        '        response = read_pickle_frame(',
+        '            sys.stdin.buffer, require_dict=True, max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES',
+        '        )',
+        '        if response is None:',
+        '            raise ConnectionError("Lost connection to LibreOffice host during tool call")',
+        '',
+        '    if response.get("status") == "error":',
+        '        raise RuntimeError(response.get("message", response.get("error", "Unknown error")))',
+        '    return response.get("result", {})',
+        '',
+        '',
+        'def get_active_document_type() -> str:',
+        '    """Return the active document\'s type (\'writer\', \'calc\', \'draw\', or \'unknown\')."""',
+        '    try:',
+        '        res = _rpc_call("list_open_documents")',
+        '        for doc in res.get("documents", []):',
+        '            if doc.get("is_active"):',
+        '                return doc.get("doc_type", "unknown")',
+        '    except Exception:',
+        '        pass',
+        '    return "unknown"',
+        '',
+        '',
+    ]
+
+    # Domain tools whitelist for host-side enforcement
+    domain_tools_map = {}
+    for ns, tool_list in sorted(groups.items()):
+        domain_tools_map[ns] = sorted([t.name for _, t in tool_list if t.name])
+
+    pretty_map = pprint.pformat(domain_tools_map, indent=4, width=120)
+    lines.append(f"DOMAIN_TOOLS = {pretty_map}")
+    lines.append("")
+    lines.append("")
+
+    for namespace in sorted(groups.keys()):
+        tool_list = groups[namespace]
+        # Emit a class that acts as a namespace (hyphens in domain names are invalid in Python identifiers).
+        safe_ns = namespace.replace("-", "_")
+        class_name = "".join(part.capitalize() for part in safe_ns.split("_")) + "Proxy"
+        lines.append(f"class _{class_name}:")
+        lines.append(f'    """Proxy for {namespace} tools."""')
+        lines.append("")
+
+        for short_name, tool in sorted(tool_list, key=lambda x: x[0]):
+            # domain_verb strip can yield a Python keyword (style_import -> import).
+            if keyword.iskeyword(short_name):
+                short_name = short_name + "_"
+            # Generate method
+            pos, kw = schema_to_signature(tool)
+            # Add self
+            all_params_list = ["self"] + pos
+            if kw:
+                all_params_list.append("*")
+                all_params_list.extend(kw)
+            
+            all_params = ", ".join(all_params_list)
+
+            rpc_pairs = [(schema_key, py_name) for py_name, schema_key, _schema in _iter_params(tool)]
+            # Scripting-only kwargs (e.g. set_style number_format) stay on the Python proxy
+            # even though they are omitted from the LLM/MCP schema (#374 P3).
+            scripting_only = sorted(getattr(tool, "scripting_only_parameters", None) or ())
+            seen_schema = {schema_key for schema_key, _py in rpc_pairs}
+            for extra in scripting_only:
+                if extra not in seen_schema:
+                    rpc_pairs.append((extra, extra))
+                    if "*" not in all_params_list:
+                        all_params_list.append("*")
+                    all_params_list.append(f'{extra}: str | None = None')
+                    all_params = ", ".join(all_params_list)
+            if rpc_pairs:
+                kwargs_body = ", " + ", ".join(f"{schema_key}={py_name}" for schema_key, py_name in rpc_pairs)
+            else:
+                kwargs_body = ""
+
+            desc = _first_sentence(tool.description or "").replace('"', '\\"')
+
+            lines.append(f"    def {short_name}({all_params}) -> dict:")
+            lines.append(f'        """{desc}"""')
+            lines.append(f'        return _rpc_call("{tool.name}"{kwargs_body})')
+            lines.append("")
+
+        # Singleton instance (keep DOMAIN_TOOLS key as registered domain string)
+        lines.append(f"{safe_ns} = _{class_name}()")
+        lines.append("")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def main():
+    # Bootstrap the registry
+    from plugin.main import get_tools
+    
+    # We need a mock environment because get_tools() might trigger bootstrap()
+    # which expects a UNO context. But ToolRegistry itself doesn't need much.
+    registry = get_tools()
+    
+    # Get all tools, regardless of doc type or tier
+    # filter_doc_type=False ensures we see all tools even without a live document
+    # Get all tools, then filter out specialized_control EXCEPT for specialized_workflow_finished
+    all_tools = registry.get_tools(filter_doc_type=False, exclude_tiers=frozenset())
+    all_tools = [t for t in all_tools if getattr(t, "tier", None) != "specialized_control" or t.name == "specialized_workflow_finished"]
+    
+    print(generate_module(all_tools))
+
+
+if __name__ == "__main__":
+    main()

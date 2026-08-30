@@ -1,0 +1,146 @@
+# WriterAgent - AI Writing Assistant for LibreOffice
+# Copyright (c) 2026 KeithCu (modifications and relicensing)
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Tests for shared subprocess IPC framing helpers."""
+
+from __future__ import annotations
+
+import io
+import os
+import pickle
+import subprocess
+from unittest.mock import MagicMock
+
+import pytest
+
+from plugin.scripting.ipc import (
+    DEFAULT_MAX_PAYLOAD_BYTES,
+    IpcFrameError,
+    pack_pickle_frame,
+    read_frame_payload,
+    read_json_line,
+    read_pickle_frame,
+    read_pickle_frame_with_timeout,
+    unpack_pickle_frame,
+    write_json_line,
+    write_pickle_frame,
+)
+
+
+def test_pickle_frame_roundtrip_with_bytes():
+    buf = io.BytesIO()
+    write_pickle_frame(buf, {"status": "ok", "buffer": b"\x00\x01split"})
+    buf.seek(0)
+    assert read_pickle_frame(buf, require_dict=True) == {"status": "ok", "buffer": b"\x00\x01split"}
+
+
+def test_unpack_rejects_reduce_gadget():
+    class Boom:
+        def __reduce__(self):
+            return (eval, ("1+1",))
+
+    payload = pickle.dumps(Boom(), protocol=5)
+    with pytest.raises(ValueError, match="not allowed"):
+        unpack_pickle_frame(payload)
+
+
+def test_pickle_frame_roundtrip():
+    buf = io.BytesIO()
+    write_pickle_frame(buf, {"status": "ok", "result": [1, 2, 3]})
+    buf.seek(0)
+
+    assert read_pickle_frame(buf, require_dict=True) == {"status": "ok", "result": [1, 2, 3]}
+
+
+def test_pack_unpack_pickle_payload():
+    frame = pack_pickle_frame({"type": "worker_event", "event": {"phase": "start"}})
+    payload = read_frame_payload(io.BytesIO(frame))
+
+    assert payload is not None
+    assert unpack_pickle_frame(payload) == {"type": "worker_event", "event": {"phase": "start"}}
+
+
+def test_truncated_pickle_frame_returns_none():
+    payload = pack_pickle_frame({"status": "ok"})
+    truncated = payload[:-2]
+
+    assert read_pickle_frame(io.BytesIO(truncated)) is None
+
+
+def test_pickle_frame_size_limit_raises():
+    frame = pack_pickle_frame({"text": "x" * 100})
+
+    with pytest.raises(IpcFrameError, match="Invalid test frame size"):
+        read_frame_payload(io.BytesIO(frame), max_payload_bytes=8, frame_label="test frame")
+
+
+def test_pickle_frame_default_cap_rejects_oversized_header():
+    import struct
+
+    oversized = struct.pack("!I", DEFAULT_MAX_PAYLOAD_BYTES + 1) + b"x"
+    with pytest.raises(IpcFrameError, match="Invalid IPC frame size"):
+        read_pickle_frame(io.BytesIO(oversized), max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES)
+
+
+def test_json_line_roundtrip():
+    buf = io.StringIO()
+    write_json_line(buf, {"status": "ready"})
+    buf.seek(0)
+
+    assert read_json_line(buf) == {"status": "ready"}
+
+
+def test_invalid_json_line_raises():
+    with pytest.raises(ValueError, match="Invalid JSON line"):
+        read_json_line(io.StringIO("{not-json}\n"))
+
+
+def test_json_line_non_object_raises():
+    with pytest.raises(ValueError, match="must contain an object"):
+        read_json_line(io.StringIO("[1, 2]\n"))
+
+
+def test_pickle_frame_timeout_on_pipe():
+    read_fd, write_fd = os.pipe()
+    try:
+        with os.fdopen(read_fd, "rb", buffering=0) as reader:
+            with pytest.raises(subprocess.TimeoutExpired):
+                read_pickle_frame_with_timeout(reader, 0.05)
+    finally:
+        os.close(write_fd)
+
+
+def test_json_line_timeout_on_pipe():
+    read_fd, write_fd = os.pipe()
+    try:
+        with os.fdopen(read_fd, "r", encoding="utf-8") as reader:
+            with pytest.raises(subprocess.TimeoutExpired):
+                read_json_line(reader, timeout_sec=0.01)
+    finally:
+        os.close(write_fd)
+
+
+def test_win32_readline_sleep_clamps_when_peek_crosses_deadline(monkeypatch):
+    """PeekNamedPipe can finish after the deadline; sleep(negative) is ValueError."""
+    from plugin.scripting import ipc
+
+    slept: list[float] = []
+    monkeypatch.setattr(ipc.time, "sleep", lambda sec: slept.append(sec))
+    times = iter([0.0, 0.009, 0.011, 0.011])
+    monkeypatch.setattr(ipc.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(ipc, "_peek_pipe_bytes_available", lambda fd: 0)
+    stream = MagicMock()
+    stream.fileno.return_value = 3
+    with pytest.raises(subprocess.TimeoutExpired):
+        ipc._readline_with_timeout_win32(stream, 0.01)
+    assert slept == [0.0]
+
+
+def test_json_line_timeout_falls_back_when_fileno_not_int():
+    """Non-int fileno() (e.g. MagicMock) must use readline, not PeekNamedPipe/select."""
+    stream = MagicMock()
+    stream.fileno.return_value = MagicMock()  # not an int
+    stream.readline.return_value = '{"status": "ready"}\n'
+    assert read_json_line(stream, timeout_sec=0.01) == {"status": "ready"}
+    stream.readline.assert_called_once()

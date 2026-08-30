@@ -37,10 +37,10 @@ python -m opendraft.cli "Your research topic" --level master --lang en
 | Component | Count | Description |
 |-----------|-------|-------------|
 | **Agents** | 5 | Specialist AI personas (research, writing, citations, editing, humanizing) |
-| **Skills** | 6 | Domain knowledge modules (69 anti-AI patterns, voice calibration, APA citations) |
+| **Skills** | 7 | Domain knowledge modules (69 anti-AI patterns, voice calibration, APA citations, LibreOffice automation) |
 | **Workflows** | 6 | Slash command procedures (/research, /draft, /cite, /humanize, /export, /status) |
 | **Engine** | 1 | OpenDraft - Research draft generator, citation engine, and CLI auditor |
-| **Tools** | 2 | YourWrite Web UI & Avoid-AI-Writing Deterministic Scoring Engine |
+| **Tools** | 3 | YourWrite Web UI, Avoid-AI-Writing Detector Engine, and WriterAgent LibreOffice Suite |
 
 ---
 
@@ -49,16 +49,17 @@ python -m opendraft.cli "Your research topic" --level master --lang en
 ```
 .agent/
 ├── agents/           # 5 Specialist Agents
-├── skills/           # 6 Skills (including unified 69-category AI bypass)
+├── skills/           # 7 Skills (including 69-category AI bypass & LibreOffice integration)
 ├── workflows/        # 6 Slash Commands
 ├── rules/            # Workspace Rules (including avoid-ai-writing.md)
-├── opendraft/        # Research Engine (Python CLI + Humanizer + Detector bridge)
+├── opendraft/        # Research Engine (Python CLI + Humanizer + Detector + Export bridge)
 └── ARCHITECTURE.md   # Full documentation
 Papers/               # Stored PDFs, extracted text, and BibTeX literature
 chatgpt_research/     # Transcripts, notes, and research archives
 tools/
 ├── yourwrite/        # Standalone Web UI (TypeScript / Express / Gemini)
-└── detector/         # Deterministic 0-100 Scoring & Preservation Engine (Node.js)
+├── detector/         # Deterministic 0-100 Scoring & Preservation Engine (Node.js)
+└── writeragent/      # LibreOffice Extension, Python Compute Service & MCP Server
 ```
 
 ---

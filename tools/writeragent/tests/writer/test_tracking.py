@@ -1,0 +1,443 @@
+from unittest.mock import MagicMock, patch
+
+from plugin.tests.testing_utils import setup_uno_mocks
+setup_uno_mocks()
+
+from plugin.calc.base import ToolCalcSpecialBase
+from plugin.writer.tracking import (
+    TrackChangesStart,
+    TrackChangesStop,
+    TrackChangesList,
+    TrackChangesShow,
+    ManageTrackedChanges,
+    TrackChangesCommentInsert,
+    TrackChangesCommentList,
+    TrackChangesCommentDelete,
+)
+
+def _create_mock_ctx():
+    ctx = MagicMock()
+    
+    doc = MagicMock()
+    # Mocking hasattr for getRedlines
+    doc.hasattr.side_effect = lambda name: name == "getRedlines"
+    
+    # Mock property value getter/setter
+    props = {"RecordChanges": False}
+    def _set_prop(name, val):
+        props[name] = val
+    def _get_prop(name):
+        return props[name]
+    doc.setPropertyValue.side_effect = _set_prop
+    doc.getPropertyValue.side_effect = _get_prop
+
+    # Default: empty redline table. The agent-self-resolution guard reads getCount() first; 0 means
+    # "no changes pending" so bulk accept/reject is allowed (the pre-guard behavior for empty docs).
+    doc.getRedlines.return_value.getCount.return_value = 0
+
+    ctx.doc = doc
+    
+    # Mock dispatcher and frame for accept/reject tests
+    dispatcher = MagicMock()
+    smgr = MagicMock()
+    smgr.createInstanceWithContext.return_value = dispatcher
+    ctx.ctx.ServiceManager = smgr
+    
+    frame = MagicMock()
+    controller = MagicMock()
+    controller.getFrame.return_value = frame
+    
+    view_settings = MagicMock()
+    controller.getViewSettings.return_value = view_settings
+    
+    doc.getCurrentController.return_value = controller
+    
+    return ctx, dispatcher, frame, view_settings
+
+def test_track_changes_tools_support_calc_document_type():
+    assert isinstance(TrackChangesStart(), ToolCalcSpecialBase)
+    assert isinstance(ManageTrackedChanges(), ToolCalcSpecialBase)
+    expected = (
+        "com.sun.star.text.TextDocument",
+        "com.sun.star.sheet.SpreadsheetDocument",
+    )
+    assert TrackChangesStart.uno_services == list(expected)
+    assert TrackChangesList.uno_services == list(expected)
+
+
+def test_track_changes_comment_tools_writer_only():
+    assert not isinstance(TrackChangesCommentInsert(), ToolCalcSpecialBase)
+    assert TrackChangesCommentInsert.uno_services == ["com.sun.star.text.TextDocument"]
+
+
+def test_track_changes_start():
+    ctx, _, _, _ = _create_mock_ctx()
+    tool = TrackChangesStart()
+    
+    res = tool.execute(ctx)
+    assert res["status"] == "ok"
+    assert "Started" in res["message"]
+    assert ctx.doc.getPropertyValue("RecordChanges") is True
+
+def test_track_changes_stop():
+    ctx, _, _, _ = _create_mock_ctx()
+    tool = TrackChangesStop()
+    
+    res = tool.execute(ctx)
+    assert res["status"] == "ok"
+    assert "Stopped" in res["message"]
+    assert ctx.doc.getPropertyValue("RecordChanges") is False
+
+def test_track_changes_list():
+    ctx, _, _, _ = _create_mock_ctx()
+    tool = TrackChangesList()
+    
+    start = MagicMock()
+    span = MagicMock()
+    span.getString.return_value = "inserted clause"
+    start.getText.return_value.createTextCursorByRange.return_value = span
+    end = MagicMock()
+
+    redline_mock = MagicMock()
+    def _get_redline_prop(prop):
+        if prop == "RedlineDateTime":
+            dt = MagicMock()
+            dt.Year = 2024
+            dt.Month = 2
+            dt.Day = 15
+            dt.Hours = 10
+            dt.Minutes = 30
+            return dt
+        if prop == "RedlineStart":
+            return start
+        if prop == "RedlineEnd":
+            return end
+        return {
+            "RedlineType": "Insert",
+            "RedlineAuthor": "Test Author",
+            "RedlineComment": "Test Comment",
+            "RedlineIdentifier": "id_1"
+        }.get(prop)
+    redline_mock.getPropertyValue.side_effect = _get_redline_prop
+    
+    enum_mock = MagicMock()
+    enum_mock.hasMoreElements.side_effect = [True, False]
+    enum_mock.nextElement.return_value = redline_mock
+    
+    ctx.doc.getRedlines.return_value.createEnumeration.return_value = enum_mock
+    
+    with patch("plugin.writer.search._describe_match_location", return_value="body"):
+        res = tool.execute(ctx)
+    assert res["status"] == "ok"
+    assert res["count"] == 1
+    assert len(res["changes"]) == 1
+    
+    change = res["changes"][0]
+    assert change["index"] == 0
+    assert change["text"] == "inserted clause"
+    assert change["location"] == "body"
+    assert change["RedlineType"] == "Insert"
+    assert change["RedlineAuthor"] == "Test Author"
+    assert change["date"] == "2024-02-15 10:30"
+
+def test_track_changes_show():
+    ctx, _, _, view_settings = _create_mock_ctx()
+    tool = TrackChangesShow()
+    
+    # Missing arg
+    res_err = tool.execute(ctx)
+    assert res_err["status"] == "error"
+    assert "Missing required parameter" in res_err["message"]
+    
+    # valid
+    res = tool.execute(ctx, show=True)
+    assert res["status"] == "ok"
+    view_settings.setPropertyValue.assert_called_with("ShowChangesInMargin", True)
+
+
+def test_track_changes_show_calc_like_controller_returns_stub():
+    """Spreadsheet controllers have no getViewSettings; Calc path is a no-op stub for now."""
+    ctx = MagicMock()
+    doc = MagicMock()
+
+    class CalcLikeController:
+        pass
+
+    doc.getCurrentController.return_value = CalcLikeController()
+    ctx.doc = doc
+
+    res = TrackChangesShow().execute(ctx, show=True)
+    assert res["status"] == "ok"
+    assert res.get("calc_track_changes_show_unsupported") is True
+    assert "not supported" in res["message"].lower()
+
+def test_manage_tracked_changes_accept_all():
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+    tool = ManageTrackedChanges()
+    
+    res = tool.execute(ctx, action="accept_all")
+    assert res["status"] == "ok"
+    dispatcher.executeDispatch.assert_called_with(frame, ".uno:AcceptAllTrackedChanges", "", 0, ())
+
+def test_manage_tracked_changes_reject_all():
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+    tool = ManageTrackedChanges()
+    
+    res = tool.execute(ctx, action="reject_all")
+    assert res["status"] == "ok"
+    dispatcher.executeDispatch.assert_called_with(frame, ".uno:RejectAllTrackedChanges", "", 0, ())
+
+def _redline_property_set():
+    """A redline like the real UNO one: a property set with RedlineStart/RedlineEnd and NO
+    getAnchor (the old tests pinned select(getAnchor()) — a method MagicMock fabricated but the
+    real object never had, which is exactly why accept/reject by index was broken)."""
+    start = MagicMock()
+    span_cursor = MagicMock()
+    start.getText.return_value.createTextCursorByRange.return_value = span_cursor
+    props = {"RedlineStart": start, "RedlineEnd": MagicMock(), "RedlineComment": "user edit"}
+    redline_mock = MagicMock(spec=["getPropertyValue"])
+    redline_mock.getPropertyValue.side_effect = lambda p: props.get(p, "")
+    return redline_mock, span_cursor
+
+
+def test_manage_tracked_changes_accept():
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+    tool = ManageTrackedChanges()
+
+    redline_mock, span_cursor = _redline_property_set()
+    enum_mock = MagicMock()
+    enum_mock.hasMoreElements.side_effect = [True, False]
+    enum_mock.nextElement.return_value = redline_mock
+
+    ctx.doc.getRedlines.return_value.createEnumeration.return_value = enum_mock
+
+    res = tool.execute(ctx, action="accept", index=0)
+    assert res["status"] == "ok"
+    ctx.doc.getCurrentController().select.assert_called_with(span_cursor)
+    dispatcher.executeDispatch.assert_called_with(frame, ".uno:AcceptTrackedChange", "", 0, ())
+
+def test_manage_tracked_changes_reject():
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+    tool = ManageTrackedChanges()
+
+    redline_mock, span_cursor = _redline_property_set()
+    enum_mock = MagicMock()
+    enum_mock.hasMoreElements.side_effect = [True, False]
+    enum_mock.nextElement.return_value = redline_mock
+
+    ctx.doc.getRedlines.return_value.createEnumeration.return_value = enum_mock
+
+    res = tool.execute(ctx, action="reject", index=0)
+    assert res["status"] == "ok"
+    ctx.doc.getCurrentController().select.assert_called_with(span_cursor)
+    dispatcher.executeDispatch.assert_called_with(frame, ".uno:RejectTrackedChange", "", 0, ())
+
+
+def test_manage_tracked_changes_accept_requires_index():
+    ctx, dispatcher, _frame, _ = _create_mock_ctx()
+    res = ManageTrackedChanges().execute(ctx, action="accept")
+    assert res["status"] == "error"
+    assert "index" in res["message"].lower()
+    dispatcher.executeDispatch.assert_not_called()
+
+
+def test_manage_tracked_changes_invalid_action():
+    ctx, dispatcher, _frame, _ = _create_mock_ctx()
+    res = ManageTrackedChanges().execute(ctx, action="squash")
+    assert res["status"] == "error"
+    dispatcher.executeDispatch.assert_not_called()
+
+# --- Comment Tests ---
+
+def test_comment_insert():
+    ctx, _, _, _ = _create_mock_ctx()
+    tool = TrackChangesCommentInsert()
+    
+    res = tool.execute(ctx, content="test comment", author="Jules")
+    assert res["status"] == "ok"
+    
+    # verify annotation creation and properties
+    ctx.doc.createInstance.assert_called_with("com.sun.star.text.textfield.Annotation")
+    anno_mock = ctx.doc.createInstance.return_value
+    
+    # Check that properties were set
+    calls = anno_mock.setPropertyValue.call_args_list
+    assert any(c[0][0] == "Content" and c[0][1] == "test comment" for c in calls)
+    assert any(c[0][0] == "Author" and c[0][1] == "Jules" for c in calls)
+    
+    # verify insertTextContent called
+    view_cursor_mock = ctx.doc.getCurrentController().getViewCursor.return_value
+    text_mock = view_cursor_mock.getText.return_value
+    text_mock.insertTextContent.assert_called_with(view_cursor_mock, anno_mock, True)
+
+
+def test_comment_insert_ok_when_uno_date_struct_missing():
+    # xdist: another test can leave com.sun.star.util without Date; insert must still succeed.
+    ctx, _, _, _ = _create_mock_ctx()
+    with patch("uno.createUnoStruct", side_effect=RuntimeError("no Date struct")):
+        res = TrackChangesCommentInsert().execute(ctx, content="test comment", author="Jules")
+    assert res["status"] == "ok"
+
+
+def test_comment_list():
+    ctx, _, _, _ = _create_mock_ctx()
+    tool = TrackChangesCommentList()
+    
+    # Mock comments
+    comment_mock = MagicMock()
+    comment_mock.supportsService.return_value = True
+    
+    def _get_comment_prop(prop):
+        if prop == "Date":
+            dt = MagicMock()
+            dt.Year = 2024
+            dt.Month = 2
+            dt.Day = 15
+            return dt
+        return {
+            "Author": "Test Author",
+            "Content": "Test Content",
+        }.get(prop)
+    comment_mock.getPropertyValue.side_effect = _get_comment_prop
+    
+    enum_mock = MagicMock()
+    enum_mock.hasMoreElements.side_effect = [True, False]
+    enum_mock.nextElement.return_value = comment_mock
+    
+    ctx.doc.getTextFields.return_value.createEnumeration.return_value = enum_mock
+    
+    res = tool.execute(ctx)
+    assert res["status"] == "ok"
+    assert res["count"] == 1
+    assert len(res["comments"]) == 1
+    
+    c = res["comments"][0]
+    assert c["index"] == 0
+    assert c["author"] == "Test Author"
+    assert c["content"] == "Test Content"
+    assert c["date"] == "2024-02-15"
+
+def test_comment_delete():
+    ctx, _, _, _ = _create_mock_ctx()
+    tool = TrackChangesCommentDelete()
+    
+    comment_mock = MagicMock()
+    comment_mock.supportsService.return_value = True
+    
+    enum_mock = MagicMock()
+    enum_mock.hasMoreElements.side_effect = [True, False]
+    enum_mock.nextElement.return_value = comment_mock
+    
+    ctx.doc.getTextFields.return_value.createEnumeration.return_value = enum_mock
+    
+    res = tool.execute(ctx, index=0)
+    assert res["status"] == "ok"
+    comment_mock.dispose.assert_called_once()
+
+
+# --- Agent-self-resolution guard (B3): the agent must never accept/reject its OWN edits --------
+
+from plugin.writer.review_scan import TOKEN_PREFIX
+
+_AGENT_COMMENT = TOKEN_PREFIX + "sess123:0"
+
+
+def _fake_redline(comment, raise_comment=False):
+    rl = MagicMock()
+    props = {"RedlineComment": comment, "RedlineIdentifier": f"id:{comment}",
+             # Real redlines expose these (and no getAnchor); the accept/reject selection uses them.
+             "RedlineStart": MagicMock(), "RedlineEnd": MagicMock()}
+
+    def _get(name):
+        if raise_comment and name == "RedlineComment":
+            raise RuntimeError("comment read boom")
+        return props[name]
+
+    rl.getPropertyValue.side_effect = _get
+    return rl
+
+
+def _install_redlines(ctx, items, count=None):
+    """Wire ctx.doc.getRedlines() to enumerate *items* (count override simulates a truncated scan)."""
+    rls = ctx.doc.getRedlines.return_value
+    rls.getCount.return_value = len(items) if count is None else count
+
+    def _mk_enum(*_a, **_k):
+        seq = list(items)
+        enum = MagicMock()
+        enum.hasMoreElements.side_effect = lambda: len(seq) > 0
+        enum.nextElement.side_effect = lambda: seq.pop(0)
+        return enum
+
+    rls.createEnumeration.side_effect = _mk_enum
+    return rls
+
+
+def test_accept_all_blocked_when_agent_change_pending():
+    ctx, dispatcher, _frame, _ = _create_mock_ctx()
+    _install_redlines(ctx, [_fake_redline(_AGENT_COMMENT)])
+    res = ManageTrackedChanges().execute(ctx, action="accept_all")
+    assert res["status"] == "error"
+    assert "agent edit" in res["message"].lower()
+    dispatcher.executeDispatch.assert_not_called()
+
+
+def test_reject_all_blocked_when_agent_change_pending():
+    ctx, dispatcher, _frame, _ = _create_mock_ctx()
+    _install_redlines(ctx, [_fake_redline(_AGENT_COMMENT)])
+    res = ManageTrackedChanges().execute(ctx, action="reject_all")
+    assert res["status"] == "error"
+    dispatcher.executeDispatch.assert_not_called()
+
+
+def test_accept_all_allowed_with_only_user_redlines():
+    # The user's OWN tracked changes (no wa-review token) may be bulk-resolved on request.
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+    _install_redlines(ctx, [_fake_redline("")])
+    res = ManageTrackedChanges().execute(ctx, action="accept_all")
+    assert res["status"] == "ok"
+    dispatcher.executeDispatch.assert_called_with(frame, ".uno:AcceptAllTrackedChanges", "", 0, ())
+
+
+def test_accept_all_blocked_when_scan_unreliable():
+    # Redlines present (count=2) but only 1 enumerates -> can't prove no agent change -> fail closed.
+    ctx, dispatcher, _frame, _ = _create_mock_ctx()
+    _install_redlines(ctx, [_fake_redline("")], count=2)
+    res = ManageTrackedChanges().execute(ctx, action="accept_all")
+    assert res["status"] == "error"
+    dispatcher.executeDispatch.assert_not_called()
+
+
+def test_single_accept_blocked_on_agent_redline():
+    ctx, dispatcher, _frame, _ = _create_mock_ctx()
+    _install_redlines(ctx, [_fake_redline(_AGENT_COMMENT)])
+    res = ManageTrackedChanges().execute(ctx, action="accept", index=0)
+    assert res["status"] == "error"
+    assert "agent edit" in res["message"].lower()
+    dispatcher.executeDispatch.assert_not_called()
+    ctx.doc.getCurrentController().select.assert_not_called()
+
+
+def test_single_reject_blocked_on_agent_redline():
+    ctx, dispatcher, _frame, _ = _create_mock_ctx()
+    _install_redlines(ctx, [_fake_redline(_AGENT_COMMENT)])
+    res = ManageTrackedChanges().execute(ctx, action="reject", index=0)
+    assert res["status"] == "error"
+    dispatcher.executeDispatch.assert_not_called()
+
+
+def test_single_accept_allowed_on_user_redline():
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+    _install_redlines(ctx, [_fake_redline("")])
+    res = ManageTrackedChanges().execute(ctx, action="accept", index=0)
+    assert res["status"] == "ok"
+    dispatcher.executeDispatch.assert_called_with(frame, ".uno:AcceptTrackedChange", "", 0, ())
+
+
+def test_single_accept_blocked_when_comment_unreadable():
+    # Fail closed: if we can't read the change's metadata we can't prove it isn't an agent change.
+    ctx, dispatcher, _frame, _ = _create_mock_ctx()
+    _install_redlines(ctx, [_fake_redline("", raise_comment=True)])
+    res = ManageTrackedChanges().execute(ctx, action="accept", index=0)
+    assert res["status"] == "error"
+    dispatcher.executeDispatch.assert_not_called()
