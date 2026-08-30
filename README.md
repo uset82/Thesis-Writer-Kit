@@ -14,32 +14,29 @@
 
 ---
 
-## ⚡ Lazy 1-Click Setup (Any AI IDE)
+## ⚡ 1-Click Easy Setup
 
-### Option A: Just drop this repository into your favorite AI IDE 🤖
-*(Antigravity, Cursor, Codex, Claude Code, Windsurf, OpenClaw)*
+### 🤖 For Any AI IDE (Antigravity, Cursor, Codex, Claude Code, Windsurf)
+Just copy and paste this single prompt directly into your AI IDE chat:
 
-1. Clone or open this repository in your IDE:
-   ```bash
-   git clone https://github.com/uset82/Thesis-Writer-Kit.git
-   ```
-2. Simply tell your AI in the chat:
-   > *"Set up Thesis-Writer-Kit and help me research, draft, and de-AI my thesis on [Your Topic]."*
+```text
+install this project git clone https://github.com/uset82/Thesis-Writer-Kit.git
+```
 
-Your IDE's agent will automatically detect the `.agent/` specialist agents, skills, and rules, install all dependencies, and begin researching over 200M+ papers!
+> **What happens automatically:** Your AI assistant will clone the repository, load the 5 specialist agents, activate the 69-pattern de-AI humanizer and voice calibration skills, install all dependencies, and prepare the 200M+ paper research engine!
 
 ---
 
-### Option B: 1-Click Automated Terminal Script 🚀
+### 💻 1-Line Terminal Clone & Auto-Setup
 
 **Windows (PowerShell):**
 ```powershell
-.\setup.ps1
+git clone https://github.com/uset82/Thesis-Writer-Kit.git; cd Thesis-Writer-Kit; .\setup.ps1
 ```
 
 **macOS / Linux (Bash):**
 ```bash
-chmod +x setup.sh && ./setup.sh
+git clone https://github.com/uset82/Thesis-Writer-Kit.git && cd Thesis-Writer-Kit && chmod +x setup.sh && ./setup.sh
 ```
 
 ---
