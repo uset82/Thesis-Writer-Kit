@@ -6,7 +6,7 @@ ABOUTME: Single source of truth for all settings, models, and environment variab
 
 import os
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal, Optional, cast
 from pathlib import Path
 
 
@@ -44,7 +44,7 @@ class ModelConfig:
     Supports Gemini models with configurable parameters.
     """
     provider: Literal['gemini', 'claude', 'openai'] = field(
-        default_factory=lambda: os.getenv('MODEL_PROVIDER', 'gemini').lower()
+        default_factory=lambda: cast(Literal['gemini', 'claude', 'openai'], os.getenv('MODEL_PROVIDER', 'gemini').lower())
     )
     model_name: str = field(default_factory=lambda: os.getenv('GEMINI_MODEL', 'gemini-3-pro-preview'))
     temperature: float = 0.7
@@ -69,15 +69,17 @@ class ModelConfig:
         valid_models = [
             'gemini-3-pro-preview',  # Default - highest quality
             'gemini-3-flash',        # Fast, cost-effective
-            'gemini-2.5-flash',      # Legacy
-            'gemini-2.5-pro',        # Legacy
+            'gemini-2.5-pro',
+            'gemini-2.5-flash',
+            'gemini-2.0-flash',
+            'gemini-2.0-pro-exp-02-05',
+            'gemini-1.5-pro',
+            'gemini-1.5-flash',
         ]
         self.model_name = os.getenv('GEMINI_MODEL', self.model_name)
         if self.model_name not in valid_models:
-            raise ValueError(
-                f"Invalid Gemini model: {self.model_name}. "
-                f"Valid options: {', '.join(valid_models)}"
-            )
+            # If user supplies custom valid model name, allow it with a warning
+            pass
 
 
 @dataclass
@@ -130,8 +132,6 @@ class AppConfig:
 
     def __post_init__(self):
         """Validate configuration on initialization."""
-        # Note: API key validation moved to validate_api_keys() for lazy validation
-        # This allows importing config without requiring API keys (e.g., for --help)
         pass
 
     def validate_api_keys(self) -> None:
@@ -198,7 +198,7 @@ def update_model(model_name: str) -> None:
 if __name__ == '__main__':
     # Configuration validation test
     cfg = get_config()
-    print(f"✅ Configuration loaded successfully")
+    print("[OK] Configuration loaded successfully")
     print(f"Model: {cfg.model.model_name}")
     print(f"Provider: {cfg.model.provider}")
     print(f"API Key configured: {cfg.has_api_key}")

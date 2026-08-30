@@ -292,6 +292,16 @@ Action: Fix all before submission
 
 ```
 
+## ⚠️ ANTI-AI FINGERPRINT ELIMINATION (YourWrite 33-Pattern Check)
+
+**Scan and eliminate all machine-generated prose markers:**
+1. **Strict Em-Dash & En-Dash Ban:** Replace every `—` and `–` with commas, periods, or parentheticals.
+2. **High-Frequency AI Vocabulary:** Remove or substitute *delve, landscape, testament, tapestry, pivotal, underscore, crucial, align with, foster, garner*.
+3. **Copula Avoidance:** Replace "serves as/stands as/boasts" with direct verbs ("is", "are", "contains", "provides").
+4. **Remove Dangling -ing Clauses:** Replace fake present-participle extensions ("highlighting the importance of...") with active sentences.
+5. **No cite_MISSING tags:** Ensure zero `{cite_MISSING}` syntax remains in the output.
+6. **No Conversational or Meta Artifacts:** Strip all chat preamble, conclusion cheerleading, and structural formulaic summaries.
+
 ---
 
 ## ⚠️ ACADEMIC INTEGRITY & VERIFICATION

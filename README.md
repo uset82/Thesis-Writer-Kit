@@ -37,9 +37,10 @@ python -m opendraft.cli "Your research topic" --level master --lang en
 | Component | Count | Description |
 |-----------|-------|-------------|
 | **Agents** | 5 | Specialist AI personas (research, writing, citations, editing, humanizing) |
-| **Skills** | 6 | Domain-specific knowledge modules |
-| **Workflows** | 6 | Slash command procedures |
-| **Engine** | 1 | OpenDraft - Research draft generator with verified citations |
+| **Skills** | 6 | Domain knowledge modules (69 anti-AI patterns, voice calibration, APA citations) |
+| **Workflows** | 6 | Slash command procedures (/research, /draft, /cite, /humanize, /export, /status) |
+| **Engine** | 1 | OpenDraft - Research draft generator, citation engine, and CLI auditor |
+| **Tools** | 2 | YourWrite Web UI & Avoid-AI-Writing Deterministic Scoring Engine |
 
 ---
 
@@ -48,11 +49,16 @@ python -m opendraft.cli "Your research topic" --level master --lang en
 ```
 .agent/
 ├── agents/           # 5 Specialist Agents
-├── skills/           # 6 Skills
+├── skills/           # 6 Skills (including unified 69-category AI bypass)
 ├── workflows/        # 6 Slash Commands
-├── rules/            # Workspace Rules
-├── opendraft/        # Research Engine (Python)
+├── rules/            # Workspace Rules (including avoid-ai-writing.md)
+├── opendraft/        # Research Engine (Python CLI + Humanizer + Detector bridge)
 └── ARCHITECTURE.md   # Full documentation
+Papers/               # Stored PDFs, extracted text, and BibTeX literature
+chatgpt_research/     # Transcripts, notes, and research archives
+tools/
+├── yourwrite/        # Standalone Web UI (TypeScript / Express / Gemini)
+└── detector/         # Deterministic 0-100 Scoring & Preservation Engine (Node.js)
 ```
 
 ---
@@ -65,7 +71,7 @@ python -m opendraft.cli "Your research topic" --level master --lang en
 | `writing-agent` | Academic drafting with thesis structure |
 | `citation-agent` | APA 7 citation verification and formatting |
 | `editor-agent` | Grammar, coherence, and style refinement |
-| `humanizer-agent` | AI detection bypass and authenticity enhancement |
+| `humanizer-agent` | 33-pattern AI cleanup and author voice calibration |
 
 ---
 
@@ -76,7 +82,7 @@ python -m opendraft.cli "Your research topic" --level master --lang en
 | `academic-writing` | Thesis structure, PEEL paragraphs, academic tone |
 | `citation-management` | APA 7 formatting, DOI verification, bibliography |
 | `thesis-structure` | Chapter organization, argument mapping |
-| `ai-bypass` | Stealth writing strategies, detection avoidance |
+| `ai-bypass` | 33-pattern anti-AI rules (YourWrite), voice calibration |
 | `research-methods` | Literature review, source screening |
 | `harper` | Grammar checking and language polish |
 
@@ -91,7 +97,7 @@ Invoke workflows with slash commands:
 | `/research` | Deep literature search on a topic |
 | `/draft` | Generate section draft with citations |
 | `/cite` | Verify and format citations |
-| `/humanize` | Apply stealth writing strategies |
+| `/humanize` | Apply 33-pattern stealth writing & voice calibration (`--sample`) |
 | `/export` | Export to PDF, Word, or LaTeX |
 | `/status` | Check project and draft status |
 

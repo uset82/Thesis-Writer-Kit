@@ -822,6 +822,18 @@ def main():
         help="Generate research exposé only (faster, no full draft)"
     )
 
+    parser.add_argument(
+        "--sample",
+        type=str,
+        help="Author writing sample file for voice calibration (used with humanize or drafting)"
+    )
+
+    parser.add_argument(
+        "--text",
+        type=str,
+        help="Direct text input for humanize command"
+    )
+
     args = parser.parse_args()
     c = Colors
 
@@ -839,6 +851,55 @@ def main():
     if args.topic and args.topic.lower() == 'verify':
         from opendraft.verify import verify_installation
         return verify_installation()
+
+    # Handle 'humanize' command (YourWrite integration)
+    if args.topic and args.topic.lower() == 'humanize':
+        from opendraft.humanize import humanize_text
+        sample_text = None
+        if args.sample:
+            s_path = Path(args.sample)
+            if s_path.exists():
+                sample_text = s_path.read_text(encoding="utf-8")
+        
+        target_text = args.text or (args.blurb if args.blurb else "")
+        if not target_text:
+            print(f"\n  {c.RED}✗{c.RESET} Please specify text with --text \"...\" or provide a file.\n")
+        print(f"\n  {c.PURPLE}[*]{c.RESET} {c.BOLD}Applying 33-pattern AI cleanup & voice calibration...{c.RESET}")
+        try:
+            out = humanize_text(target_text, writing_sample=sample_text)
+            if args.output:
+                args.output.write_text(out, encoding="utf-8")
+                print(f"  {c.GREEN}[OK]{c.RESET} Saved humanized draft to: {args.output}\n")
+            else:
+                print(f"\n{c.CYAN}{'=' * 50}{c.RESET}")
+                print(out)
+                print(f"{c.CYAN}{'=' * 50}{c.RESET}\n")
+            return 0
+        except Exception as e:
+            print_friendly_error(e)
+            return 1
+
+    # Handle 'audit' command (avoid-ai-writing deterministic scoring)
+    if args.topic and args.topic.lower() == 'audit':
+        from opendraft.detector import analyze_text, format_cli_report
+        target_text = args.text or (args.blurb if args.blurb else "")
+        if not target_text and args.output and Path(args.output).exists():
+            target_text = Path(args.output).read_text(encoding="utf-8")
+        
+        if not target_text:
+            print(f"\n  {c.RED}[X]{c.RESET} Please specify text with --text \"...\" or provide a file.\n")
+            return 1
+
+        print(f"\n  {c.PURPLE}[*]{c.RESET} {c.BOLD}Running deterministic AI audit & pattern analysis...{c.RESET}")
+        try:
+            res = analyze_text(target_text)
+            print()
+            print(format_cli_report(res))
+            print()
+            return 0 if res.is_clean else 1
+        except Exception as e:
+            print_friendly_error(e)
+            return 1
 
     # Interactive mode
     if not args.topic:
