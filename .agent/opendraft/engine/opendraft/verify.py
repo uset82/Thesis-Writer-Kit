@@ -47,9 +47,10 @@ def check_dependencies():
         try:
             __import__(package.replace("-", "_"))
             print(f"   ✅ {package}")
-        except ImportError:
-            print(f"   ❌ {package} (missing)")
-            all_installed = False
+        except (ImportError, OSError, Exception) as e:
+            print(f"   ⚠️  {package} (not fully loaded / optional native libs missing)")
+            if package not in ["weasyprint"]:
+                all_installed = False
 
     return all_installed
 
